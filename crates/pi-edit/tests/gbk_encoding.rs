@@ -453,3 +453,15 @@ fn policy_encodes_root_and_spec_semantics_shared_with_napi() {
 	);
 	assert_eq!(policy.resolve(std::path::Path::new("/proj/README.md"), true), None);
 }
+
+#[test]
+fn policy_resolves_verbatim_prefixed_paths() {
+	// Simulate the Windows verbatim (`\\?\C:\x`) form a walker hands out;
+	// a policy root in ordinary form must still govern it.
+	let verbatim = std::path::PathBuf::from(r"\\?\C:\proj\src\a.c");
+	let ordinary_root = gbk_policy(std::path::PathBuf::from(r"C:\proj").as_path());
+	assert_eq!(ordinary_root.resolve(&verbatim, true), Some(TextEncoding::Gbk));
+	// And the verbatim form of an unrelated root stays unmanaged.
+	let other = std::path::PathBuf::from(r"\\?\D:\elsewhere\a.c");
+	assert_eq!(ordinary_root.resolve(&other, true), None);
+}

@@ -64,34 +64,36 @@ fn resolve_strictness(value: Option<AstMatchStrictness>) -> MatchStrictness {
 #[napi(object, object_to_js = false)]
 pub struct AstFindOptions<'env> {
 	/// ast-grep patterns to search for (OR across patterns).
-	pub patterns:     Option<Vec<String>>,
+	pub patterns:        Option<Vec<String>>,
 	/// Language override; otherwise inferred from file extension per candidate.
-	pub lang:         Option<String>,
+	pub lang:            Option<String>,
 	/// Single file or directory to scan (combined with `glob` when set): a
 	/// host path or an absolute `scheme://` URL.
-	pub path:         Option<String>,
+	pub path:            Option<String>,
 	/// Optional glob filter relative to the search root.
-	pub glob:         Option<String>,
+	pub glob:            Option<String>,
 	/// Rule selector for multi-rule ast-grep configurations.
-	pub selector:     Option<String>,
+	pub selector:        Option<String>,
 	/// Pattern strictness; defaults to smart matching when omitted.
-	pub strictness:   Option<AstMatchStrictness>,
+	pub strictness:      Option<AstMatchStrictness>,
 	/// Maximum matches to return after `offset` (default applies when omitted).
-	pub limit:        Option<u32>,
+	pub limit:           Option<u32>,
 	/// Number of leading matches to skip before applying `limit`.
-	pub offset:       Option<u32>,
+	pub offset:          Option<u32>,
 	/// When true, include meta-variable bindings per match.
-	pub include_meta: Option<bool>,
+	pub include_meta:    Option<bool>,
 	/// Reserved for contextual snippets; not used by the current native find
 	/// path.
-	pub context:      Option<u32>,
+	pub context:         Option<u32>,
 	/// Optional cancellation handle (library-specific).
-	pub signal:       Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// Wall-clock timeout for the worker task in milliseconds.
-	pub timeout_ms:   Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Filesystem candidates are resolved, walked, and read through (native
 	/// when absent).
-	pub filesystem:   Option<ShellFilesystem>,
+	pub filesystem:      Option<ShellFilesystem>,
+	/// Project encoding policy: GBK-managed files decode before parsing.
+	pub encoding_policy: Option<crate::encoding::EncodingPolicyOptions>,
 }
 
 /// One ast-grep match with source range and optional meta-variables.
@@ -324,6 +326,9 @@ pub struct AstReplaceOptions<'env> {
 	/// Filesystem candidates are resolved, walked, read, and written through
 	/// (native when absent).
 	pub filesystem:          Option<ShellFilesystem>,
+	/// Project encoding policy: GBK-managed files decode before parsing and
+	/// re-encode (strictly) on write.
+	pub encoding_policy:     Option<crate::encoding::EncodingPolicyOptions>,
 }
 
 /// One textual replacement applied to a file (before/after slice and
@@ -396,6 +401,30 @@ struct PendingFileChange {
 struct PendingWrite {
 	absolute_path: PathBuf,
 	output:        String,
+}
+
+/// Read a candidate's source: strict UTF-8 upstream, or strict GBK when the
+/// policy manages the path (byte offset in the error, never mojibake).
+fn read_candidate_source(
+	fs: &BlockingFs,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	path: &std::path::Path,
+) -> std::io::Result<String> {
+	let managed = encoding
+		.as_ref()
+		.and_then(|policy| policy.resolve(path, true));
+	if managed != Some(pi_edit::encoding::TextEncoding::Gbk) {
+		return fs.read_to_string(path);
+	}
+	let bytes = fs.read(path)?;
+	pi_edit::encoding::decode_strict(&bytes, pi_edit::encoding::TextEncoding::Gbk).map_err(
+		|offset| {
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				format!("invalid GBK byte sequence at offset {offset}"),
+			)
+		},
+	)
 }
 
 fn to_u32(value: usize) -> u32 {
@@ -658,9 +687,11 @@ pub fn ast_grep<'env>(
 		signal,
 		timeout_ms,
 		filesystem,
+		encoding_policy,
 	} = options;
 
 	let fs = ShellFilesystem::blocking(filesystem);
+	let encoding = crate::encoding::compile_policy_options(encoding_policy.as_ref())?;
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
@@ -703,7 +734,8 @@ pub fn ast_grep<'env>(
 				continue;
 			};
 			let lang_key = language.canonical_name();
-			let source = match fs.read_to_string(&candidate.absolute_path) {
+			let source = match read_candidate_source(&fs, encoding.as_ref(), &candidate.absolute_path)
+			{
 				Ok(source) => source,
 				Err(err) => {
 					for compiled in &compiled_patterns {
@@ -931,9 +963,11 @@ pub fn ast_edit<'env>(
 		signal,
 		timeout_ms,
 		filesystem,
+		encoding_policy,
 	} = options;
 
 	let fs = ShellFilesystem::blocking(filesystem);
+	let encoding = crate::encoding::compile_policy_options(encoding_policy.as_ref())?;
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	task::filesystem(env, "ast_edit", ct, fs, move |fs, ct| {
 		ast_edit_blocking(
@@ -949,6 +983,7 @@ pub fn ast_edit<'env>(
 			max_replacements,
 			max_files,
 			fail_on_parse_error,
+			encoding.as_ref(),
 		)
 	})
 }
@@ -970,6 +1005,7 @@ fn ast_edit_blocking(
 	max_replacements: Option<u32>,
 	max_files: Option<u32>,
 	fail_on_parse_error: Option<bool>,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 ) -> Result<AstReplaceResult> {
 	let rewrite_rules = normalize_rewrite_map(rewrites)?;
 	let strictness = resolve_strictness(strictness);
@@ -1091,7 +1127,7 @@ fn ast_edit_blocking(
 			continue;
 		}
 
-		let source = match fs.read_to_string(&candidate.absolute_path) {
+		let source = match read_candidate_source(fs, encoding, &candidate.absolute_path) {
 			Ok(source) => source,
 			Err(err) => {
 				if fail_on_parse_error {
@@ -1187,15 +1223,39 @@ fn ast_edit_blocking(
 	}
 
 	if !dry_run {
+		// Validate every GBK output before the first write: an unrepresentable
+		// character refuses the whole batch instead of half-landing on disk.
+		for write in &pending_writes {
+			if encoding.as_ref().is_some_and(|policy| {
+				policy.resolve(&write.absolute_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
+			}) && let Err((offset, ch)) =
+				pi_edit::encoding::encode_strict(&write.output, pi_edit::encoding::TextEncoding::Gbk)
+			{
+				return Err(Error::from_reason(format!(
+					"{}: character U+{:04X} ({}) at byte offset {offset} cannot be represented in GBK",
+					write.absolute_path.display(),
+					ch as u32,
+					ch
+				)));
+			}
+		}
 		for write in &pending_writes {
 			ct.heartbeat()?;
-			fs.write(&write.absolute_path, &write.output)
-				.map_err(|err| {
-					Error::from_reason(format!(
-						"Failed to write {}: {err}",
-						write.absolute_path.display()
-					))
-				})?;
+			let gbk = encoding.as_ref().is_some_and(|policy| {
+				policy.resolve(&write.absolute_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
+			});
+			let result = if gbk {
+				pi_edit::encoding::encode_strict(&write.output, pi_edit::encoding::TextEncoding::Gbk)
+					.map_err(|(_, ch)| {
+						std::io::Error::other(format!("character {ch:?} not representable in GBK"))
+					})
+					.and_then(|bytes| fs.write(&write.absolute_path, bytes))
+			} else {
+				fs.write(&write.absolute_path, write.output.as_bytes())
+			};
+			result.map_err(|err| {
+				Error::from_reason(format!("Failed to write {}: {err}", write.absolute_path.display()))
+			})?;
 		}
 	}
 

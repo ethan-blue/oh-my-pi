@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import { encodeStrict } from "../encoding/index";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -159,11 +161,34 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 /**
  * Apply text edits to a file.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
+ * GBK-managed files decode through the project encoding policy on read and
+ * strictly re-encode on write, so a workspace edit never flips the charset.
  */
 export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const content = await Bun.file(filePath).text();
+	const bytes = await Bun.file(filePath).bytes();
+	const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
 	const result = applyTextEditsToString(content, edits);
-	await Bun.write(filePath, result);
+	await writeTextWithPolicy(filePath, result);
+}
+
+/**
+ * Write `text` to `filePath` in the file's policy charset (GBK-managed paths
+ * encode strictly; everything else keeps the UTF-8 default). Unrepresentable
+ * characters throw before anything lands on disk.
+ */
+export async function writeTextWithPolicy(filePath: string, text: string): Promise<void> {
+	const encoding = resolveWriteEncoding(filePath, true);
+	if (encoding === "gbk") {
+		await Bun.write(filePath, encodeStrict(text, "gbk"));
+		return;
+	}
+	await Bun.write(filePath, text);
+}
+
+/** Read a file through the encoding policy (GBK-managed files decode strictly). */
+export async function readTextFileWithPolicy(filePath: string): Promise<string> {
+	const bytes = await Bun.file(filePath).bytes();
+	return readTextWithPolicy(path.dirname(filePath), filePath, bytes).text;
 }
 
 /** A reference file and the text edits a rename computed for it. */
@@ -191,14 +216,14 @@ export async function applyEditsThenRename(
 ): Promise<void> {
 	const backups: Array<{ filePath: string; original: string }> = [];
 	for (const { filePath, edits } of references) {
-		backups.push({ filePath, original: await Bun.file(filePath).text() });
+		backups.push({ filePath, original: await readTextFileWithPolicy(filePath) });
 		await applyTextEdits(filePath, edits);
 	}
 	try {
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		await Promise.all(backups.map(({ filePath, original }) => writeTextWithPolicy(filePath, original)));
 		throw err;
 	}
 }

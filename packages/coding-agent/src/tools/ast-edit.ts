@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import { discoverEncodingPolicy } from "../encoding/index";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
@@ -58,6 +59,7 @@ interface AstEditCallOptions {
 	failOnParseError: boolean;
 	signal?: AbortSignal;
 	filesystem: ShellFilesystem;
+	encodingPolicy?: { root: string; json: string };
 }
 
 interface AstEditAggregatedResult {
@@ -93,6 +95,7 @@ async function runAstEditTargets(
 			failOnParseError: options.failOnParseError,
 			signal: options.signal,
 			filesystem: options.filesystem,
+			encodingPolicy: options.encodingPolicy,
 		});
 		totalReplacements += targetResult.totalReplacements;
 		filesSearched += targetResult.filesSearched;
@@ -281,12 +284,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+			const discoveredEncoding = discoverEncodingPolicy(this.session.cwd);
+			const encodingPolicy = discoveredEncoding
+				? { root: discoveredEncoding.root, json: discoveredEncoding.json }
+				: undefined;
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,
 				dryRun: true,
 				maxFiles,
 				failOnParseError: false,
+				encodingPolicy,
 				signal,
 				filesystem: urlFilesystem.shellFilesystem(),
 			});
@@ -435,6 +443,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,
+							encodingPolicy,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(

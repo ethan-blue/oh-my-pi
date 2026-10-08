@@ -11,6 +11,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
+import { discoverEncodingPolicy } from "../encoding/index";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
@@ -501,6 +502,10 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				context: resolveContext,
 				tier: resolveToolTier(this, params),
 			});
+			const encodingPolicyOption = (() => {
+				const discovered = discoverEncodingPolicy(this.session.cwd);
+				return discovered ? { root: discovered.root, json: discovered.json } : undefined;
+			})();
 			const filesystem = urlFilesystem.shellFilesystem();
 			const materializedExternalPaths = new Map<string, string>();
 			const materializeExternalUrlForSearch = async (rawPath: string) => {
@@ -663,6 +668,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
+									encodingPolicy: encodingPolicyOption,
 								},
 								undefined,
 							);
@@ -711,6 +717,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,
+								encodingPolicy: encodingPolicyOption,
 							},
 							undefined,
 						);

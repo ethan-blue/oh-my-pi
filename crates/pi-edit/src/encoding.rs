@@ -282,7 +282,12 @@ impl CompiledEncodingPolicy {
 	/// else `newFileEncoding`; existing files are managed only when an include
 	/// glob matches, then take the first matching override, else the default.
 	pub fn resolve(&self, path: &Path, exists: bool) -> Option<TextEncoding> {
-		let relative = path.strip_prefix(&self.root).ok()?;
+		// Walkers on Windows hand out verbatim (`\\?\C:\x`) forms of the same
+		// path; normalize both sides before matching so an ordinary-form root
+		// still governs them.
+		let path = strip_verbatim(path);
+		let root = strip_verbatim(&self.root);
+		let relative = path.strip_prefix(root.as_ref()).ok()?;
 		let relative = to_forward_slashes(relative);
 		if !exists {
 			return self
@@ -317,6 +322,20 @@ fn compile_glob(pattern: &str) -> Result<GlobMatcher, String> {
 		.build()
 		.map(|glob| glob.compile_matcher())
 		.map_err(|err| format!("invalid glob '{pattern}': {err}"))
+}
+
+/// Borrowed path with a Windows verbatim prefix (`\\?\C:\x` or
+/// `\\?\UNC\server\x`) rewritten to its ordinary form; other paths pass
+/// through unchanged.
+fn strip_verbatim(path: &Path) -> std::borrow::Cow<'_, Path> {
+	let text = path.to_string_lossy();
+	if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+		return std::borrow::Cow::Owned(PathBuf::from(format!(r"\\{rest}")));
+	}
+	if let Some(rest) = text.strip_prefix(r"\\?\") {
+		return std::borrow::Cow::Owned(PathBuf::from(rest.to_owned()));
+	}
+	std::borrow::Cow::Borrowed(path)
 }
 
 fn to_forward_slashes(path: &Path) -> Cow<'_, str> {

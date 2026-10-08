@@ -146,6 +146,10 @@ pub struct GrepOptions<'env> {
 	/// from exhausting the global `max_count` budget before other files are
 	/// reached.
 	pub max_count_per_file: Option<u32>,
+	/// Project encoding policy (`.omp/encoding.json`): GBK-managed files are
+	/// transcoded to UTF-8 (lossily, search-only) before matching, so Chinese
+	/// patterns match and result lines render correctly.
+	pub encoding_policy:    Option<crate::encoding::EncodingPolicyOptions>,
 	/// Abort signal for cancelling the operation.
 	pub signal:             Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
@@ -888,6 +892,8 @@ pub(crate) struct GrepConfig {
 	pub(crate) max_columns:        Option<u32>,
 	pub(crate) mode:               Option<GrepOutputMode>,
 	pub(crate) max_count_per_file: Option<u32>,
+	/// Project encoding policy; GBK-managed files transcode before matching.
+	pub(crate) encoding:           Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	/// Filesystem the search path is resolved, walked, and read through.
 	pub(crate) filesystem:         BlockingFs,
 	/// Receives results while searching instead of the returned `matches`.
@@ -1290,6 +1296,8 @@ enum FileOutcome {
 struct PassState<'a> {
 	/// Filesystem every candidate is read through.
 	fs:                     BlockingFs,
+	/// Project encoding policy; GBK-managed files transcode before matching.
+	encoding:               Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	results:                Mutex<Vec<FileSearchResult>>,
 	deferred:               Mutex<Vec<pi_walker::FileCandidate>>,
 	files_searched:         AtomicU64,
@@ -1302,13 +1310,21 @@ struct PassState<'a> {
 }
 
 impl<'a> PassState<'a> {
-	fn new(fs: &BlockingFs) -> Self {
-		Self::with_sink(fs, None)
+	fn new(
+		fs: &BlockingFs,
+		encoding: Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	) -> Self {
+		Self::with_sink(fs, encoding, None)
 	}
 
-	fn with_sink(fs: &BlockingFs, sink: Option<&'a dyn MatchSink>) -> Self {
+	fn with_sink(
+		fs: &BlockingFs,
+		encoding: Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+		sink: Option<&'a dyn MatchSink>,
+	) -> Self {
 		Self {
 			fs: fs.clone(),
+			encoding,
 			results: Mutex::default(),
 			deferred: Mutex::default(),
 			files_searched: AtomicU64::default(),
@@ -1397,6 +1413,7 @@ fn search_one_file<M: Matcher + Sync>(
 	file: &pi_walker::FileCandidate,
 	file_params: SearchParams,
 	policy: ReadPolicy,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	sink: Option<&dyn MatchSink>,
 ) -> Result<FileOutcome> {
 	let read = match policy {
@@ -1406,7 +1423,13 @@ fn search_one_file<M: Matcher + Sync>(
 		ReadPolicy::Prefix => read_file_prefix(fs, &file.path, &mut worker.buffer),
 	};
 	match read {
-		Ok(ReadFile::Read) => {},
+		Ok(ReadFile::Read) => {
+			if let Some(policy) = encoding
+				&& policy.resolve(&file.path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
+			{
+				crate::encoding::transcode_gbk_lossy(&mut worker.buffer);
+			}
+		},
 		Ok(ReadFile::Oversized) => return Ok(FileOutcome::Defer),
 		Ok(ReadFile::Skipped) => {
 			return Ok(match policy {
@@ -1455,7 +1478,16 @@ fn handle_file<M: Matcher + Sync>(
 	{
 		return Ok(());
 	}
-	match search_one_file(&state.fs, worker, matcher, file, file_params, policy, state.sink)? {
+	match search_one_file(
+		&state.fs,
+		worker,
+		matcher,
+		file,
+		file_params,
+		policy,
+		state.encoding.as_ref(),
+		state.sink,
+	)? {
 		FileOutcome::Defer => {
 			state.deferred.lock().push(file.clone());
 		},
@@ -1547,6 +1579,10 @@ fn run_pass<M: Matcher + Sync>(
 /// Deferring oversized files lets smaller files surface first and lets a
 /// satisfied match budget skip the oversized pass entirely. Normal results
 /// always precede oversized results; each group is path-sorted internally.
+#[allow(
+	clippy::too_many_arguments,
+	reason = "threads the encoding policy beside the existing search params"
+)]
 fn process_candidates<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	candidates: Vec<pi_walker::FileCandidate>,
@@ -1554,10 +1590,11 @@ fn process_candidates<M: Matcher + Sync>(
 	params: SearchParams,
 	parallel_allowed: bool,
 	stop_after_matches: Option<u64>,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let file_params = per_file_params(params);
-	let state = PassState::new(fs);
+	let state = PassState::new(fs, encoding.cloned());
 
 	// Partition oversized-by-hint files out of pass 1 up front; files without a
 	// size hint stay in pass 1 and are deferred at read time if oversized.
@@ -1619,6 +1656,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 	stop_after_matches: Option<u64>,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
@@ -1636,7 +1674,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	else {
 		return Ok((Vec::new(), 0, 0));
 	};
-	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, ct)
+	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, encoding, ct)
 }
 
 #[allow(
@@ -1740,6 +1778,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 	stop_after_matches: u64,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
@@ -1753,7 +1792,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		pi_walker::WalkOrder::Path,
 	)?;
 	let file_params = per_file_params(params);
-	let state = PassState::new(fs);
+	let state = PassState::new(fs, encoding.cloned());
 	let mut window = Vec::with_capacity(GREP_STREAM_WINDOW);
 	let mut results = Vec::new();
 
@@ -1837,12 +1876,13 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
+	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
 		None => {
-			let state = PassState::new(fs);
+			let state = PassState::new(fs, encoding.cloned());
 			let results = run_parallel_streaming_grep(
 				&state,
 				search_path,
@@ -1872,6 +1912,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				include_hidden,
 				use_gitignore,
 				skip_node_modules,
+				encoding,
 				ct,
 				Some(stop),
 			)
@@ -1886,6 +1927,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 			include_hidden,
 			use_gitignore,
 			skip_node_modules,
+			encoding,
 			ct,
 			stop,
 		),
@@ -2085,6 +2127,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	matcher: &M,
 ) -> Result<GrepResult> {
 	let fs = &options.filesystem;
+	let encoding = options.encoding.clone();
 	let search_path = iofs::absolute_search_path(&options.path)?;
 	let metadata = fs
 		.metadata(&search_path)
@@ -2157,10 +2200,10 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		}
 
 		let mut buffer = Vec::new();
-		let bytes = match read_file_bytes(fs, &search_path, &mut buffer) {
-			Ok(ReadFile::Read) => &buffer,
+		match read_file_bytes(fs, &search_path, &mut buffer) {
+			Ok(ReadFile::Read) => {},
 			Ok(ReadFile::Oversized) => match read_file_prefix(fs, &search_path, &mut buffer) {
-				Ok(ReadFile::Read) => &buffer,
+				Ok(ReadFile::Read) => {},
 				_ => {
 					return Ok(GrepResult {
 						matches:            Vec::new(),
@@ -2182,7 +2225,13 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					skipped_oversized:  None,
 				});
 			},
-		};
+		}
+		if encoding.as_ref().is_some_and(|policy| {
+			policy.resolve(&search_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
+		}) {
+			crate::encoding::transcode_gbk_lossy(&mut buffer);
+		}
+		let bytes = &buffer;
 
 		if output_mode == OutputMode::FilesWithMatches && max_count.is_none() && offset == 0 {
 			let matched = matcher
@@ -2287,7 +2336,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 
 	let mentions_node_modules = glob.is_some_and(|g| g.contains("node_modules"));
 	if let Some(sink) = stream {
-		let state = PassState::with_sink(fs, Some(sink));
+		let state = PassState::with_sink(fs, encoding, Some(sink));
 		run_parallel_streaming_grep(
 			&state,
 			&search_path,
@@ -2312,6 +2361,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		include_hidden,
 		use_gitignore,
 		!mentions_node_modules,
+		encoding.as_ref(),
 		&ct,
 	)?;
 	let (results, skipped_oversized, files_searched) = results;
@@ -2593,11 +2643,13 @@ pub fn grep<'env>(
 		signal,
 		filesystem,
 		on_matches,
+		encoding_policy,
 	} = options;
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback, ct.clone())));
 	let filesystem = ShellFilesystem::blocking(filesystem);
+	let encoding = crate::encoding::compile_policy_options(encoding_policy.as_ref())?;
 	task::filesystem(env, "grep", ct, filesystem, move |filesystem, ct| {
 		let config = GrepConfig {
 			filesystem,
@@ -2621,6 +2673,7 @@ pub fn grep<'env>(
 			context,
 			max_columns,
 			mode,
+			encoding,
 		};
 		let result = grep_sync(config, on_match.as_ref(), ct);
 		match stream {

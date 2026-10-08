@@ -17,6 +17,7 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { readTextFileWithPolicy } from "../lsp/edits";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
@@ -359,7 +360,7 @@ export async function attemptEditAutoRepair(options: {
 	// observation — and may even have restored the parse.
 	let current: string;
 	try {
-		current = await Bun.file(snapshot.path).text();
+		current = await readTextFileWithPolicy(snapshot.path);
 	} catch {
 		return undefined;
 	}

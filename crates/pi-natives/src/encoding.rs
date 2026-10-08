@@ -27,6 +27,34 @@ pub(crate) fn compile_policy(root: String, json: &str) -> Result<Arc<CompiledEnc
 		.map_err(reason)
 }
 
+/// Raw policy input for option structs (grep/ast/edit): the project root plus
+/// the `.omp/encoding.json` contents. Compiled once per call.
+#[napi(object)]
+pub struct EncodingPolicyOptions {
+	pub root: String,
+	pub json: String,
+}
+
+/// Compile [`EncodingPolicyOptions`] when present.
+pub(crate) fn compile_policy_options(
+	options: Option<&EncodingPolicyOptions>,
+) -> Result<Option<Arc<CompiledEncodingPolicy>>> {
+	match options {
+		None => Ok(None),
+		Some(options) => compile_policy(options.root.clone(), &options.json).map(Some),
+	}
+}
+
+/// Lossy GBK→UTF-8 transcode for search-only views: invalid sequences become
+/// U+FFFD so matching continues (grep never writes, so the strict read/write
+/// contract does not apply here; edits go through the strict path instead).
+pub(crate) fn transcode_gbk_lossy(buffer: &mut Vec<u8>) {
+	let (text, _) = encoding_rs::GBK.decode_without_bom_handling(buffer.as_slice());
+	let bytes = text.into_owned().into_bytes();
+	buffer.clear();
+	buffer.extend_from_slice(&bytes);
+}
+
 /// A compiled `.omp/encoding.json` bound to one project root. Cheap to
 /// query; create one per project and reuse it.
 #[napi]
@@ -77,10 +105,7 @@ const fn encoding_label(encoding: TextEncoding) -> &'static str {
 pub fn encoding_decode_strict(bytes: Uint8Array, encoding: String) -> Result<String> {
 	let encoding = TextEncoding::parse(&encoding).map_err(reason)?;
 	decode_strict(&bytes, encoding).map_err(|offset| {
-		reason(format!(
-			"invalid {} byte sequence at offset {offset}",
-			encoding_label(encoding)
-		))
+		reason(format!("invalid {} byte sequence at offset {offset}", encoding_label(encoding)))
 	})
 }
 

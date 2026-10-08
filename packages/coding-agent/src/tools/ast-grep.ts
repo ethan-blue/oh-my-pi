@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import { discoverEncodingPolicy } from "../encoding/index";
 
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
@@ -76,6 +77,7 @@ async function runMultiTargetAstGrep(
 		limit: number;
 		signal?: AbortSignal;
 		filesystem: ShellFilesystem;
+		encodingPolicy?: { root: string; json: string };
 	},
 ): Promise<{
 	matches: AstFindMatch[];
@@ -103,6 +105,7 @@ async function runMultiTargetAstGrep(
 			includeMeta: true,
 			signal: options.signal,
 			filesystem: options.filesystem,
+			encodingPolicy: options.encodingPolicy,
 		});
 		totalMatches += targetResult.totalMatches;
 		filesWithMatches += targetResult.filesWithMatches;
@@ -222,6 +225,11 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
+			const discoveredEncoding = discoverEncodingPolicy(this.session.cwd);
+			const encodingPolicyOption = discoveredEncoding
+				? { root: discoveredEncoding.root, json: discoveredEncoding.json }
+				: undefined;
+
 			const DEFAULT_AST_LIMIT = 50;
 			const result = multiTargets
 				? await runMultiTargetAstGrep(multiTargets, {
@@ -232,6 +240,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						limit: DEFAULT_AST_LIMIT,
 						signal,
 						filesystem,
+						encodingPolicy: encodingPolicyOption,
 					})
 				: await astGrep({
 						patterns,
@@ -242,6 +251,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						includeMeta: true,
 						signal,
 						filesystem,
+						encodingPolicy: encodingPolicyOption,
 					});
 
 			const normalizedParseErrors = (result.parseErrors ?? []).map(error => {
