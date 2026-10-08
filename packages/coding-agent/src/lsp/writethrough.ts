@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { isEnoent, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
+import { resolveWriteEncoding, decodeStrict } from "../encoding/index";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import {
 	beginPendingDiskWrite,
@@ -133,7 +134,7 @@ export async function writethroughNoop(
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<WritethroughResult> {
-	await writeFileWithFallback(dst, content, file);
+	await writeFileWithFallback(dst, content, file, resolveWriteEncoding(dst, true));
 	return { finalContent: content };
 }
 
@@ -377,9 +378,10 @@ async function runLspWritethrough(
 	// there (the caller already wrote `content` when `contentAlreadyWritten`).
 	let diskContent = contentAlreadyWritten ? content : undefined;
 	const writeContent = async (value: string) => {
-		await writeFileWithFallback(dst, value, file);
+		await writeFileWithFallback(dst, value, file, writeEncoding);
 		diskContent = value;
 	};
+	const writeEncoding = resolveWriteEncoding(dst, changeType !== FileChangeType.Created);
 	/** Commit {@link finalContent} unless those exact bytes are already on disk. */
 	const commitWrite = async () => {
 		if (diskContent !== finalContent) await writeContent(finalContent);
@@ -583,9 +585,13 @@ async function flushWritethroughBatch(
 	const finalContents = new Map<string, string>();
 	for (const entry of batch) {
 		const bundle = getDeferred?.(entry.dst);
-		let content: string;
+		let content: string | undefined;
 		try {
-			content = await fs.promises.readFile(entry.dst, "utf8");
+			const bytes = await fs.promises.readFile(entry.dst);
+			// GBK-managed files decode through the policy so the post-write
+			// format/diagnostics pass sees the same text the editor does.
+			content =
+				resolveWriteEncoding(entry.dst, true) === "gbk" ? decodeStrict(bytes, "gbk") : bytes.toString("utf8");
 		} catch (error) {
 			if (isEnoent(error)) {
 				bundle?.finalize(undefined);

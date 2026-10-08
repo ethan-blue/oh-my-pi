@@ -75,6 +75,7 @@ fn path_policy(cwd: &std::path::Path, home: &std::path::Path) -> PathPolicy {
 		plan_writable_roots:  Vec::new(),
 		plan_active:          false,
 		block_auto_generated: true,
+		encoding:             None,
 	}
 }
 

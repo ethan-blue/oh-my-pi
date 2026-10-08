@@ -130,6 +130,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
+import { encodeStrict } from "../encoding/index";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { resolveSyscallTarget } from "./path-utils";
 
@@ -159,6 +160,14 @@ export interface FileWriteFallbackRequest {
 	sessionId: string | undefined;
 	/** The exact bytes the tool intended to write. */
 	content: string;
+	/**
+	 * Charset `content` must be persisted with: `"gbk"` when the project's
+	 * encoding policy manages `dst`, `undefined` for UTF-8. A handler that
+	 * brokers the bytes through a privileged channel MUST encode with this
+	 * charset (strictly — no substitution) or refuse the write; writing
+	 * `content` as UTF-8 when this is `"gbk"` would corrupt the file.
+	 */
+	encoding: "gbk" | undefined;
 	/**
 	 * The error that proves the write hit a permission boundary. Usually the write's
 	 * own `EPERM`/`EACCES`/`EROFS`; for a write into a directory the host may not
@@ -399,16 +408,32 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	return { kind: "retry" };
 }
 
-export async function writeFileWithFallback(dst: string, content: string, file?: BunFile): Promise<void> {
+/**
+ * Write `content` to `dst`, falling back to registered handlers on permission
+ * denials. `encoding === "gbk"` strictly encodes the text to GBK bytes first
+ * (throws on unrepresentable characters); the fallback request then carries
+ * the original text plus `encoding` so a privileged handler re-encodes the
+ * same way.
+ */
+export async function writeFileWithFallback(
+	dst: string,
+	content: string,
+	file?: BunFile,
+	encoding?: "gbk",
+): Promise<void> {
+	let payload: string | Uint8Array = content;
+	if (encoding === "gbk") {
+		payload = encodeStrict(content, "gbk");
+	}
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
 	for (let attempt = 0; ; attempt++) {
 		try {
 			if (file) {
-				await file.write(content);
+				await file.write(payload);
 			} else {
-				await Bun.write(dst, content);
+				await Bun.write(dst, payload);
 			}
 			return;
 		} catch (error) {
@@ -443,7 +468,7 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 					const sessionId = mutationSessionStorage.getStore();
 					for (const handler of Array.from(fallbackHandlers)) {
 						try {
-							if (await handler({ dst: target, content, cause: failure.cause, sessionId })) return;
+							if (await handler({ dst: target, content, encoding, cause: failure.cause, sessionId })) return;
 						} catch (handlerError) {
 							logger.warn("File write fallback handler threw; trying next handler", {
 								dst: target,

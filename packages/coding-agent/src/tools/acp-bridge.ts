@@ -42,6 +42,23 @@ export async function shouldRouteWriteThroughBridge(
 }
 
 /**
+ * Whether a write to `absolutePath` would actually reach an ACP client: a
+ * bridge with `writeTextFile` is connected AND the routing predicate accepts
+ * the path. Unlike {@link shouldRouteWriteThroughBridge} this is `false`
+ * when no editor client is attached — the encoding layer uses it to refuse
+ * GBK-managed writes only when a bridge could really land them.
+ */
+export async function hasActiveWriteBridge(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+): Promise<boolean> {
+	const bridge = session.getClientBridge?.();
+	if (!bridge?.capabilities.writeTextFile || !bridge.writeTextFile) return false;
+	return shouldRouteWriteThroughBridge(session, requestedPath, absolutePath);
+}
+
+/**
  * Result of a bridge-routed write: the content actually verified on disk
  * after the client processed the write, plus whether that content diverges
  * from what the tool asked to persist.

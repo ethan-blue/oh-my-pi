@@ -78,24 +78,40 @@ pub struct EditPolicy {
 	pub home_dir:             String,
 	/// The payload is a verbatim custom-format string, not JSON.
 	pub raw_input:            bool,
+	/// Project encoding policy root (absolute) — the directory containing
+	/// `.omp/encoding.json`. Required with `encoding_json`.
+	pub encoding_root:        Option<String>,
+	/// Raw `.omp/encoding.json` contents; the session compiles and enforces
+	/// the same policy the TypeScript shell resolved.
+	pub encoding_json:        Option<String>,
 }
 
 impl EditPolicy {
 	fn into_config(self) -> Result<SessionConfig> {
+		let encoding = match (&self.encoding_root, &self.encoding_json) {
+			(None, None) => None,
+			(Some(root), Some(json)) => Some(crate::encoding::compile_policy(root.clone(), json)?),
+			_ => {
+				return Err(napi::Error::from_reason(
+					"encodingRoot and encodingJson must be provided together",
+				));
+			},
+		};
 		Ok(SessionConfig {
 			mode:               parse_mode(&self.mode)?,
 			policy:             PathPolicy {
-				cwd:                  PathBuf::from(self.cwd),
-				home_dir:             PathBuf::from(self.home_dir),
-				url_schemes:          self.url_schemes,
-				url_alias_schemes:    self.url_alias_schemes,
-				plan_writable_roots:  self
+				cwd: PathBuf::from(self.cwd),
+				home_dir: PathBuf::from(self.home_dir),
+				url_schemes: self.url_schemes,
+				url_alias_schemes: self.url_alias_schemes,
+				plan_writable_roots: self
 					.plan_writable_roots
 					.into_iter()
 					.map(PathBuf::from)
 					.collect(),
-				plan_active:          self.plan_active,
+				plan_active: self.plan_active,
 				block_auto_generated: self.block_auto_generated,
+				encoding,
 			},
 			allow_fuzzy:        self.allow_fuzzy,
 			fuzzy_threshold:    self.fuzzy_threshold,
@@ -174,7 +190,10 @@ pub struct EditWriteRequest {
 	pub move_to:      Option<String>,
 	/// Final bytes as text; null for `delete`.
 	pub content:      Option<String>,
-	/// Last write of this call and the LSP batch requested a flush.
+	/// Charset the host must persist `content` with: `"gbk"` or null (UTF-8).
+	/// The engine already strictly validated GBK encodability; the host
+	/// encodes the same text at its disk sink.
+	pub encoding:     Option<String>,
 	pub flush_lsp:    bool,
 	pub lsp_batch_id: Option<String>,
 }
@@ -243,6 +262,20 @@ impl EditStore {
 	#[napi(constructor)]
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the encoding policy `recordSnapshotFile` decodes managed files
+	/// with; pass null/undefined to restore UTF-8-only behavior. Invalid
+	/// policy JSON throws.
+	#[napi]
+	pub fn set_encoding_policy(&self, root: Option<String>, json: Option<String>) -> Result<()> {
+		let policy = match (root, json) {
+			(Some(root), Some(json)) => Some(crate::encoding::compile_policy(root, &json)?),
+			(None, None) => None,
+			_ => return Err(napi::Error::from_reason("root and json must be provided together")),
+		};
+		self.inner.set_encoding_policy(policy);
+		Ok(())
 	}
 
 	/// Record `text` (any line endings) as the current snapshot of
@@ -465,6 +498,9 @@ impl EditWriter for TsfnWriter {
 			op:           op.to_owned(),
 			move_to:      request.move_to.map(|p| p.to_string_lossy().into_owned()),
 			content:      request.content,
+			encoding:     request
+				.encoding
+				.map(|encoding| encoding.as_str().to_owned()),
 			flush_lsp:    request.flush_lsp,
 			lsp_batch_id: request.lsp_batch_id,
 		};
@@ -851,6 +887,7 @@ pub fn edit_auto_generated_message(absolute_path: String, display_path: String) 
 		plan_writable_roots:  Vec::new(),
 		plan_active:          false,
 		block_auto_generated: true,
+		encoding:             None,
 	};
 	let mut head = [0u8; 1024];
 	let read = std::fs::File::open(&absolute_path)

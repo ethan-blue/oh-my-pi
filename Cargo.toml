@@ -352,6 +352,7 @@ shlex = "2"
 # Search & File Walking
 # ──────────────────────────────────────────────────────────────────────────────
 globset = "0.4"
+encoding_rs = "0.8"
 grep-matcher = "0.1"
 grep-pcre2 = "0.1"
 grep-regex = "0.1"

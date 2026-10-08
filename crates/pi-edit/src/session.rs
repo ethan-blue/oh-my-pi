@@ -54,6 +54,10 @@ pub struct WriteRequest {
 	pub move_to:      Option<PathBuf>,
 	/// Final bytes as text; `None` for deletes.
 	pub content:      Option<String>,
+	/// Charset the host must persist `content` with (`None` = UTF-8). GBK
+	/// text is already strictly encode-validated in Rust; the host encodes
+	/// the same text to bytes at its disk sink.
+	pub encoding:     Option<crate::encoding::TextEncoding>,
 	/// Last write of this call && the LSP batch requested a flush.
 	pub flush_lsp:    bool,
 	pub lsp_batch_id: Option<String>,
@@ -318,6 +322,7 @@ impl Session {
 						op:           file.op,
 						move_to:      file.move_to.as_ref().map(|m| m.absolute.clone()),
 						content:      file.persisted.clone(),
+						encoding:     file.encoding,
 						flush_lsp:    request.lsp_flush && last_write == Some(index),
 						lsp_batch_id: request.lsp_batch_id.clone(),
 					})

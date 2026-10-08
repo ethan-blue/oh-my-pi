@@ -21,6 +21,7 @@ use std::{
 };
 
 use crate::{
+	encoding::{TextEncoding, UTF8_BOM, decode_strict, encode_strict, line_endings_unrestorable},
 	engine::{FileOp, Resolved},
 	error::{EditError, EditResult},
 	notebook,
@@ -31,21 +32,32 @@ use crate::{
 /// One target file as read from disk plus its normalized editable form.
 #[derive(Debug)]
 pub struct FileRead {
-	pub resolved:    Resolved,
+	pub resolved:             Resolved,
 	/// Snapshot-store key.
-	pub canonical:   PathBuf,
-	/// Bytes as read (notebook JSON for `.ipynb`).
-	pub raw:         String,
-	pub bom:         &'static str,
-	pub ending:      LineEnding,
+	pub canonical:            PathBuf,
+	/// Bytes as read, decoded to the engine's Unicode model (notebook JSON
+	/// for `.ipynb`; GBK-decoded text when the encoding policy manages the
+	/// file — never lossy).
+	pub raw:                  String,
+	pub bom:                  &'static str,
+	pub ending:               LineEnding,
 	/// LF-normalized, BOM-stripped editable text (notebook cell projection).
-	pub text:        String,
-	pub is_notebook: bool,
+	pub text:                 String,
+	pub is_notebook:          bool,
+	/// Charset the file persists with (`utf8` unless the encoding policy
+	/// manages this path).
+	pub encoding:             TextEncoding,
+	/// Mixed (or lone-CR) line endings the persist step cannot faithfully
+	/// restore; GBK-managed files refuse to write in that case.
+	pub endings_unrestorable: bool,
 }
 
 impl FileRead {
 	/// Encode LF-normalized post-edit text back to the bytes this file
 	/// persists with: BOM and line endings restored, notebooks re-serialized.
+	/// GBK-managed files are strictly encode-validated here (before any write
+	/// is issued) and refuse when their original line endings cannot be
+	/// restored exactly.
 	pub fn persist(&self, after_lf: &str) -> EditResult<String> {
 		if self.is_notebook {
 			return notebook::serialize_edited_notebook_text(
@@ -55,6 +67,9 @@ impl FileRead {
 			)
 			.map_err(|err| EditError::apply(err.to_string()));
 		}
+		if self.encoding == TextEncoding::Gbk {
+			persist_gbk_guard(&self.resolved.display, self.endings_unrestorable, after_lf)?;
+		}
 		let mut out = String::with_capacity(self.bom.len() + after_lf.len());
 		out.push_str(self.bom);
 		out.push_str(&restore_line_endings(after_lf, self.ending));
@@ -62,13 +77,46 @@ impl FileRead {
 	}
 }
 
+/// Write-side GBK guarantees: refuse unrestorable line endings, and verify
+/// every character of the final text has a GBK byte sequence (encoding never
+/// substitutes `?`, U+FFFD, or HTML numeric references).
+fn persist_gbk_guard(display: &str, endings_unrestorable: bool, after_lf: &str) -> EditResult<()> {
+	if endings_unrestorable {
+		return Err(EditError::apply(format!(
+			"{display}: refusing to write a GBK-managed file with mixed line endings (CRLF and LF \
+			 mixed, or lone CR); normalize the line endings first or add a path override to the \
+			 encoding policy"
+		)));
+	}
+	if let Err((offset, ch)) = encode_strict(after_lf, TextEncoding::Gbk) {
+		let line = after_lf[..offset].matches('\n').count() + 1;
+		return Err(EditError::apply(format!(
+			"{display}: character U+{:04X} ({}) on line {line} cannot be represented in GBK; remove \
+			 it or add a path override with encoding \"utf8\" to the encoding policy",
+			ch as u32, ch
+		)));
+	}
+	Ok(())
+}
+
 /// Persist text for a file that did not exist before the edit.
-pub fn persist_new(resolved: &Resolved, after_lf: &str) -> EditResult<String> {
+///
+/// The encoding comes from the policy's new-file rule (override match, else
+/// `newFileEncoding`); GBK output is strictly validated before the write.
+pub fn persist_new(policy: &PathPolicy, resolved: &Resolved, after_lf: &str) -> EditResult<String> {
 	if notebook::is_notebook_path(&resolved.absolute) {
 		return notebook::serialize_edited_notebook_text(None, after_lf, &resolved.display)
 			.map_err(|err| EditError::apply(err.to_string()));
 	}
+	if policy.resolve_encoding(&resolved.absolute, false) == Some(TextEncoding::Gbk) {
+		persist_gbk_guard(&resolved.display, false, after_lf)?;
+	}
 	Ok(after_lf.to_owned())
+}
+
+/// New-file encoding the policy assigns to `resolved` (for write requests).
+pub fn new_file_encoding(policy: &PathPolicy, resolved: &Resolved) -> Option<TextEncoding> {
+	policy.resolve_encoding(&resolved.absolute, false)
 }
 
 /// Filesystem view an engine reads through.
@@ -226,11 +274,45 @@ impl FileCache {
 		{
 			return Err(EditError::apply(message));
 		}
-		let raw = String::from_utf8(bytes).map_err(|err| EditError::InvalidUtf8 {
-			display:     resolved.display.clone(),
-			valid_up_to: err.utf8_error().valid_up_to(),
-		})?;
 		let is_notebook = notebook::is_notebook_path(&resolved.absolute);
+		// Encoding policy: notebooks always stay UTF-8 (JSON); a GBK-managed
+		// file is strictly decoded (BOM conflict refused, invalid bytes carry
+		// their offset); everything else keeps upstream UTF-8 semantics.
+		let managed_encoding = if is_notebook {
+			None
+		} else {
+			self.policy.resolve_encoding(&resolved.absolute, true)
+		};
+		let (raw, encoding) = match managed_encoding {
+			None | Some(TextEncoding::Utf8) => match String::from_utf8(bytes) {
+				Ok(raw) => (raw, TextEncoding::Utf8),
+				Err(err) => {
+					return Err(EditError::InvalidUtf8 {
+						display:     resolved.display.clone(),
+						valid_up_to: err.utf8_error().valid_up_to(),
+					});
+				},
+			},
+			Some(TextEncoding::Gbk) => {
+				if bytes.starts_with(&UTF8_BOM) {
+					return Err(EditError::apply(format!(
+						"{}: policy conflict — the file carries a UTF-8 BOM but the encoding policy \
+						 assigns GBK; add an override with encoding \"utf8\" for this path",
+						resolved.display
+					)));
+				}
+				match decode_strict(&bytes, TextEncoding::Gbk) {
+					Ok(raw) => (raw, TextEncoding::Gbk),
+					Err(offset) => {
+						return Err(EditError::apply(format!(
+							"{}: invalid GBK byte sequence at offset {offset}; refusing to decode \
+							 lossily (fix the file or add a path override)",
+							resolved.display
+						)));
+					},
+				}
+			},
+		};
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
 				.map_err(|err| EditError::apply(err.to_string()))?;
@@ -239,10 +321,14 @@ impl FileCache {
 			let (bom, body) = strip_bom(&raw);
 			(bom, normalize_to_lf(body).into_owned())
 		};
-		let ending = if is_notebook {
-			LineEnding::Lf
+		let (ending, endings_unrestorable) = if is_notebook {
+			(LineEnding::Lf, false)
 		} else {
-			detect_line_ending(strip_bom(&raw).1)
+			let body = strip_bom(&raw).1;
+			(
+				detect_line_ending(body),
+				encoding == TextEncoding::Gbk && line_endings_unrestorable(body),
+			)
 		};
 		let read = Arc::new(FileRead {
 			canonical: canonical_key(&resolved.absolute),
@@ -252,6 +338,8 @@ impl FileCache {
 			ending,
 			text,
 			is_notebook,
+			encoding,
+			endings_unrestorable,
 		});
 		self
 			.reads

@@ -8,6 +8,7 @@
 
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
+	encoding::TextEncoding,
 	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
 	error::EditError,
 	files::FileSource,
@@ -225,6 +226,7 @@ impl ModeEngine for ReplaceEngine {
 			streaming: false,
 		});
 		let mut staged = StagedFile::new(display, read.resolved.absolute.clone(), FileOp::Update);
+		staged.encoding = (read.encoding != TextEncoding::Utf8).then_some(read.encoding);
 		staged.before_raw = Some(read.raw.clone());
 		staged.before.clone_from(&read.text);
 		staged.after = after;

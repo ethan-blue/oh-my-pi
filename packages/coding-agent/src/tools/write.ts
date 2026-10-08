@@ -34,9 +34,10 @@ import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 
-import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
+import { hasActiveWriteBridge, routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
+import { encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
@@ -251,7 +252,8 @@ async function readCurrentWriteSource(
 ): Promise<string | undefined> {
 	const readDisk = async (): Promise<string | undefined> => {
 		try {
-			return await Bun.file(absolutePath).text();
+			const bytes = await Bun.file(absolutePath).bytes();
+			return readTextWithPolicy(session.cwd, absolutePath, bytes).text;
 		} catch (error) {
 			if (isEnoent(error)) return undefined;
 			throw error;
@@ -941,9 +943,28 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			emitWriteProgress(onUpdate, cleanBytes, displayPath, absolutePath);
 
+			// Encoding policy: a GBK-managed destination encodes strictly (and
+			// refuses unrepresentable characters before anything is written);
+			// the ACP bridge has no encoding contract, so a routed GBK write is
+			// refused up front instead of letting the client land UTF-8 bytes.
+			const writeEncoding = resolveWriteEncoding(absolutePath, existing !== undefined);
+			let gbkBytes: Uint8Array | undefined;
+			if (writeEncoding === "gbk") {
+				if (await hasActiveWriteBridge(this.session, path, absolutePath)) {
+					throw new ToolError(
+						`${displayPath} is a GBK-managed file; the active ACP bridge does not preserve its encoding on save. Disable the bridge for this project or add an encoding-policy override with "utf8".`,
+					);
+				}
+				gbkBytes = encodeStrict(cleanContent, "gbk");
+			}
+			const payloadBytes = gbkBytes?.byteLength ?? cleanBytes;
+
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+			const bridgeWrite =
+				writeEncoding === "gbk"
+					? undefined
+					: await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
 			if (bridgeWrite) {
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
@@ -978,7 +999,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
-			const finalBytes = finalContent === cleanContent ? cleanBytes : Buffer.byteLength(finalContent, "utf8");
+			const finalBytes =
+				finalContent === cleanContent
+					? payloadBytes
+					: writeEncoding === "gbk"
+						? encodeStrict(finalContent, "gbk").byteLength
+						: Buffer.byteLength(finalContent, "utf8");
 			const writeLine = `Successfully wrote ${finalBytes} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {

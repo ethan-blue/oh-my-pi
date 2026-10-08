@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+encoding_rs.workspace = true
+globset.workspace = true
 parking_lot.workspace = true
 pi-ast.workspace = true
 pi-diff.workspace = true

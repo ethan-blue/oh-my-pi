@@ -20,6 +20,7 @@
 //! TypeScript implementation they replace; models are trained on them.
 
 pub mod diff_string;
+pub mod encoding;
 pub mod engine;
 pub mod error;
 pub mod files;
@@ -32,6 +33,7 @@ pub mod store;
 pub mod stream_json;
 pub mod text;
 
+pub use encoding::{CompiledEncodingPolicy, TextEncoding, decode_strict, encode_strict};
 pub use engine::{
 	EditMode, FileOp, FileOpIntent, HeaderKind, Inspection, ModeEngine, PreviewFile, Resolved,
 	StagedFile,

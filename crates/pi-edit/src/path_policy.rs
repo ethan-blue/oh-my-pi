@@ -39,7 +39,7 @@ pub struct UrlResolution {
 }
 
 /// Session-wide path policy supplied by the host once per tool call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PathPolicy {
 	pub cwd:                  PathBuf,
 	pub home_dir:             PathBuf,
@@ -53,9 +53,28 @@ pub struct PathPolicy {
 	pub plan_writable_roots:  Vec<PathBuf>,
 	pub plan_active:          bool,
 	pub block_auto_generated: bool,
+	/// Project encoding policy (`.omp/encoding.json`); `None` keeps upstream
+	/// UTF-8-everywhere behavior.
+	pub encoding:             Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>,
 }
 
 impl PathPolicy {
+	/// Resolve the charset `absolute` persists with; `None` means unmanaged
+	/// (upstream behavior). `exists` picks the existing-file rule (include
+	/// globs + overrides + default) vs the new-file rule (overrides +
+	/// new-file encoding); see
+	/// [`crate::encoding::CompiledEncodingPolicy::resolve`].
+	pub fn resolve_encoding(
+		&self,
+		absolute: &Path,
+		exists: bool,
+	) -> Option<crate::encoding::TextEncoding> {
+		self
+			.encoding
+			.as_ref()
+			.and_then(|policy| policy.resolve(absolute, exists))
+	}
+
 	/// The internal URL `authored` names: the hashline-header-unwrapped
 	/// target (minus one leading `@` mention marker) when it starts with a
 	/// registered `scheme://` (case-insensitive), with the single-slash
@@ -686,6 +705,7 @@ mod tests {
 			plan_writable_roots:  vec![root.join("sandbox")],
 			plan_active:          false,
 			block_auto_generated: true,
+			encoding:             None,
 		}
 	}
 

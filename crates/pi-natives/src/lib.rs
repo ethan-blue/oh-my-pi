@@ -33,6 +33,7 @@ pub mod desktop;
 pub mod devicecheck;
 pub mod diff;
 pub mod edit;
+pub mod encoding;
 pub mod fd;
 pub mod file_lock;
 pub mod glob;

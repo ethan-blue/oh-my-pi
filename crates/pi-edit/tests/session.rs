@@ -424,6 +424,7 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 			plan_writable_roots:  Vec::new(),
 			plan_active:          false,
 			block_auto_generated: true,
+			encoding:             None,
 		},
 		allow_fuzzy:        true,
 		fuzzy_threshold:    0.95,

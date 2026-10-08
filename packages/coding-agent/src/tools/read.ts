@@ -2,6 +2,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
+import { decodeStrict, resolveFileEncoding } from "../encoding/index";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -241,9 +242,13 @@ async function readWholeFile(absolutePath: string): Promise<Buffer | undefined> 
  * stripping decoder. {@link BufferedFileText.strippedText} therefore reproduces
  * that decode for hashing while {@link BufferedFileText.rawText} stays verbatim
  * for the emitted lines and their byte accounting.
+ *
+ * `encoding === "gbk"` decodes through the strict codec instead — the same
+ * decode the Rust edit engine applies, so the displayed text, the snapshot
+ * hash, and any later edit all agree on one text.
  */
-function deriveBufferedFileText(bytes: Buffer): BufferedFileText {
-	const rawText = bytes.toString("utf-8");
+function deriveBufferedFileText(bytes: Buffer, encoding?: "gbk"): BufferedFileText {
+	const rawText = encoding === "gbk" ? decodeStrict(bytes, "gbk") : bytes.toString("utf-8");
 	const strippedText = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
 	// `normalizeToLF` allocates a copy; skip it outright for the common LF file.
 	const normalizedText = strippedText.includes("\r") ? normalizeToLF(strippedText) : strippedText;
@@ -425,6 +430,8 @@ function sameSeekFileIdentity(identity: SeekFileIdentity, stat: SeekFileIdentity
 interface StreamFileLinesOptions {
 	includeTerminalNewline?: boolean;
 	stopScanAfterCollect?: boolean;
+	/** Strictly decode lines as GBK (policy-managed files) instead of UTF-8. */
+	encoding?: "gbk";
 	/**
 	 * Start scanning at byte `byte`, which begins 0-indexed line `line` (`line <= startLine`).
 	 * Lines before `startLine` contribute nothing but their count, so skipping them is exact.
@@ -442,7 +449,7 @@ async function streamLinesFromFile(
 	signal?: AbortSignal,
 	options: StreamFileLinesOptions = {},
 ): Promise<ReadLineWindow> {
-	const { includeTerminalNewline = false, stopScanAfterCollect = false, seek } = options;
+	const { includeTerminalNewline = false, stopScanAfterCollect = false, seek, encoding } = options;
 	const bufferChunk = Buffer.allocUnsafe(READ_CHUNK_SIZE);
 	const collectedLines: string[] = [];
 	let lineIndex = seek?.line ?? 0;
@@ -486,6 +493,16 @@ async function streamLinesFromFile(
 
 	const decodeLine = (): string => {
 		if (currentLineLength === 0) return "";
+		// LF/CR never occur inside a GBK double-byte sequence, so the byte-level
+		// line split above never cut a character in half; strict decoding of the
+		// whole line either succeeds or reports the offending offset.
+		if (encoding === "gbk") {
+			const whole =
+				currentLineChunks.length === 0
+					? (pendingSegment ?? Buffer.alloc(0))
+					: Buffer.concat([...currentLineChunks, ...(pendingSegment ? [pendingSegment] : [])], currentLineLength);
+			return decodeStrict(whole, "gbk");
+		}
 		if (currentLineChunks.length === 0) return pendingSegment?.toString("utf-8") ?? "";
 		if (pendingSegment) currentLineChunks.push(pendingSegment);
 		return Buffer.concat(currentLineChunks, currentLineLength).toString("utf-8");
@@ -1465,6 +1482,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
+		fileEncoding?: "gbk",
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
@@ -1532,6 +1550,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: await streamLinesFromFile(absolutePath, rangeStart, maxLines, maxBytesForRead, maxLines, signal, {
 							includeTerminalNewline: rawSelector,
 							stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
+							encoding: fileEncoding,
 						});
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
@@ -2091,6 +2110,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} else {
 			// `wholeFileBytes` was materialized once above for the image sniff;
 			// reuse it here instead of a second full read.
+			// Encoding policy: a GBK-managed file decodes through the strict codec
+			// (same decode as the edit engine) instead of UTF-8. A UTF-8 BOM under
+			// a GBK rule is a policy conflict reported before any decoding.
+			const fileEncoding =
+				located || isRawSelector(parsed) ? undefined : resolveFileEncoding(this.session.cwd, absolutePath, true);
+			const managedGbk = fileEncoding === "gbk";
+			if (managedGbk) {
+				const bom = wholeFileBytes
+					? wholeFileBytes.subarray(0, 3)
+					: Buffer.from(await Bun.file(absolutePath).slice(0, 3).bytes());
+				if (bom[0] === 0xef && bom[1] === 0xbb && bom[2] === 0xbf) {
+					throw new ToolError(
+						`${resolvedDisplayPath}: policy conflict — the file carries a UTF-8 BOM but the encoding policy assigns GBK; add an override with encoding "utf8" for this path`,
+					);
+				}
+			}
 			// Binary sniff before any UTF-8 text materialization. A binary file
 			// (font, object, archive, packed blob) decodes to NUL/control bytes and
 			// U+FFFD mojibake that corrupts the terminal and burns context. Images,
@@ -2100,9 +2135,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// covers both the multi-range and single-range disk paths below.
 			const looksBinary =
 				!isRawSelector(parsed) &&
-				(wholeFileBytes
-					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
-					: await isProbablyBinary(absolutePath));
+				(managedGbk
+					? false
+					: wholeFileBytes
+						? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
+						: await isProbablyBinary(absolutePath));
 			// Executables and IDBs open in IDA instead of being refused. Speculative
 			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
 			// ordinary execution that does.
@@ -2129,7 +2166,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					.done();
 			}
 			// Decode only what survived the sniff.
-			const buffered = wholeFileBytes ? deriveBufferedFileText(wholeFileBytes) : undefined;
+			const buffered = wholeFileBytes
+				? deriveBufferedFileText(wholeFileBytes, managedGbk ? "gbk" : undefined)
+				: undefined;
 			if (buffered) onBufferedFile?.(buffered.bytes);
 
 			// Unbounded schemes (instruction documents) read whole: no summary, no result limits.
@@ -2212,6 +2251,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
+						managedGbk ? "gbk" : undefined,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -2293,6 +2333,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									includeTerminalNewline: rawSelector,
 									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
 									seek: tailSeekTo?.(startLine),
+									encoding: managedGbk ? "gbk" : undefined,
 								},
 							);
 

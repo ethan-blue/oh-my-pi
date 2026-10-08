@@ -115,6 +115,7 @@ impl Workspace {
 				plan_writable_roots:  Vec::new(),
 				plan_active:          false,
 				block_auto_generated: true,
+				encoding:             None,
 			},
 			allow_fuzzy: true,
 			fuzzy_threshold: 0.95,

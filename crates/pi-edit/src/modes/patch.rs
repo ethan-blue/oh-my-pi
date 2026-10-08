@@ -8,18 +8,20 @@ use crate::{
 		BlockContextSource, DiffHunk, LineDiff, generate_diff_string, normalize_create_content,
 		parse_diff_hunks,
 	},
+	encoding::TextEncoding,
 	engine::{
 		EditMode, FileOp, FileOpIntent, HeaderKind, Inspection, ModeEngine, PreviewFile, Resolved,
 		StagedFile,
 	},
 	error::EditError,
-	files::{FileRead, FileSource, persist_new},
+	files::{FileRead, FileSource, new_file_encoding, persist_new},
 	fuzzy::{
 		ContextLineResult, ContextMatchStrategy, FindMatchOptions, SequenceMatchStrategy,
 		SequenceSearchResult, find_closest_sequence_match, find_context_line, find_match,
 		seek_sequence,
 	},
 	notebook::is_notebook_path,
+	path_policy::PathPolicy,
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{
@@ -1364,6 +1366,7 @@ const fn engine_op(op: Operation) -> FileOp {
 
 fn stage_from_parts(
 	input: &PatchInput<'_>,
+	policy: &PathPolicy,
 	resolved: Resolved,
 	read: Option<Arc<FileRead>>,
 	after: Option<String>,
@@ -1386,11 +1389,22 @@ fn stage_from_parts(
 	let preview = line_diff.numbered(None, &source);
 	let op = engine_op(input.op);
 	let persisted = match after.as_deref() {
-		Some(text) if use_new_encoding || read.is_none() => Some(persist_new(&resolved, text)?),
+		Some(text) if use_new_encoding || read.is_none() => {
+			Some(persist_new(policy, &resolved, text)?)
+		},
 		Some(text) => Some(read.as_ref().unwrap().persist(text)?),
 		None => None,
 	};
+	let encoding = if use_new_encoding || read.is_none() {
+		new_file_encoding(policy, &resolved)
+	} else {
+		match read.as_deref() {
+			Some(read) => (read.encoding != TextEncoding::Utf8).then_some(read.encoding),
+			None => None,
+		}
+	};
 	let mut staged = StagedFile::new(resolved.display.clone(), resolved.absolute, op);
+	staged.encoding = encoding;
 	staged.move_to = move_to;
 	staged.existed = read.is_some();
 	staged.before_raw = read.as_ref().map(|value| value.raw.clone());
@@ -1535,6 +1549,7 @@ pub fn stage_patch(
 	let entry = apply_entry(&input, files, allow_fuzzy, threshold, allow_create_overwrite)?;
 	let mut staged = stage_from_parts(
 		&input,
+		files.policy(),
 		entry.resolved,
 		entry.read,
 		entry.after,
@@ -1559,7 +1574,7 @@ pub fn preview_patch(
 	let display = input.path.to_owned();
 	let rename = input.rename.map(str::to_owned);
 	match apply_entry(&input, files, allow_fuzzy, threshold, allow_create_overwrite)
-		.and_then(|entry| preview_entry(&input, entry, streaming))
+		.and_then(|entry| preview_entry(&input, files.policy(), entry, streaming))
 	{
 		Ok(preview) => preview,
 		Err(error) => {
@@ -1569,22 +1584,26 @@ pub fn preview_patch(
 }
 
 /// The part of [`stage_from_parts`] a preview shows: the numbered diff, plus
-/// the persist step only where it can fail (notebook re-serialization).
+/// the persist step only where it can fail (notebook re-serialization, GBK
+/// write guards).
 fn preview_entry(
 	input: &PatchInput<'_>,
+	policy: &PathPolicy,
 	entry: AppliedEntry,
 	streaming: bool,
 ) -> Result<PreviewFile, EditError> {
 	if let Some(text) = entry.after.as_deref() {
 		match &entry.read {
 			Some(read) if !entry.use_new_encoding => {
-				if read.is_notebook {
+				if read.is_notebook || read.encoding == TextEncoding::Gbk {
 					read.persist(text)?;
 				}
 			},
 			_ => {
-				if is_notebook_path(&entry.resolved.absolute) {
-					persist_new(&entry.resolved, text)?;
+				if is_notebook_path(&entry.resolved.absolute)
+					|| new_file_encoding(policy, &entry.resolved) == Some(TextEncoding::Gbk)
+				{
+					persist_new(policy, &entry.resolved, text)?;
 				}
 			},
 		}
@@ -1777,6 +1796,7 @@ impl ModeEngine for PatchEngine {
 		Ok(vec![{
 			let mut staged = stage_from_parts(
 				&synthetic,
+				files.policy(),
 				initial_resolved,
 				initial,
 				after,

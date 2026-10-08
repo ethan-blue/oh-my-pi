@@ -133,6 +133,10 @@ pub struct StagedFile {
 	/// Clipboard state to publish once this file's write lands (hashline
 	/// `CUT`/`PUT` registers).
 	pub clipboard_after:    Option<crate::store::Clipboard>,
+	/// Charset the write must persist with; `None` keeps the host's UTF-8
+	/// default. Set from the read (existing files) or the policy's new-file
+	/// rule (creates).
+	pub encoding:           Option<crate::encoding::TextEncoding>,
 }
 
 impl StagedFile {
@@ -158,6 +162,7 @@ impl StagedFile {
 			text_override: None,
 			record_snapshot: false,
 			clipboard_after: None,
+			encoding: None,
 		}
 	}
 }

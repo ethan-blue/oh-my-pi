@@ -14,6 +14,7 @@ use self::{
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
+	encoding::TextEncoding,
 	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
 	error::EditError,
 	files::FileSource,
@@ -189,6 +190,7 @@ impl ModeEngine for SloppyEngine {
 				read.resolved.absolute.clone(),
 				FileOp::Update,
 			);
+			file.encoding = (read.encoding != TextEncoding::Utf8).then_some(read.encoding);
 			file.before_raw = Some(read.raw.clone());
 			file.before.clone_from(&read.text);
 			file.after = after;

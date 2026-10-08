@@ -6737,6 +6737,8 @@ name = "pi-edit"
 version = "18.8.4"
 dependencies = [
  "async-trait",
+ "encoding_rs",
+ "globset",
  "parking_lot",
  "pi-ast",
  "pi-diff",

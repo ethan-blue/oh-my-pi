@@ -168,7 +168,10 @@ impl Default for StoreState {
 /// Thread-safe state shared for the lifetime of an edit session.
 #[derive(Default, Clone)]
 pub struct EditStore {
-	inner: Arc<Mutex<StoreState>>,
+	inner:    Arc<Mutex<StoreState>>,
+	/// Project encoding policy (`.omp/encoding.json`) for `record_file`
+	/// reads; set by the host before the first record. Absent → UTF-8.
+	encoding: Arc<Mutex<Option<Arc<crate::encoding::CompiledEncodingPolicy>>>>,
 }
 
 impl EditStore {
@@ -177,10 +180,25 @@ impl EditStore {
 		Self::default()
 	}
 
+	/// Set the encoding policy `record_file` decodes managed files with
+	/// (replaces any previous policy; `None` restores UTF-8-only behavior).
+	pub fn set_encoding_policy(&self, policy: Option<Arc<crate::encoding::CompiledEncodingPolicy>>) {
+		*self.encoding.lock() = policy;
+	}
+
+	/// Resolve the encoding `record_file` would decode `absolute` with.
+	fn file_encoding(&self, absolute: &Path) -> Option<crate::encoding::TextEncoding> {
+		self
+			.encoding
+			.lock()
+			.as_ref()
+			.and_then(|policy| policy.resolve(absolute, true))
+	}
+
 	/// Construct a store with explicit limits.
 	pub fn with_limits(max_paths: usize, max_versions: usize, max_total_units: usize) -> Self {
 		let state = StoreState { max_paths, max_versions, max_total_units, ..StoreState::default() };
-		Self { inner: Arc::new(Mutex::new(state)) }
+		Self { inner: Arc::new(Mutex::new(state)), encoding: Arc::new(Mutex::new(None)) }
 	}
 
 	/// Record normalized text under a canonical path and return its tag.
@@ -227,11 +245,21 @@ impl EditStore {
 	}
 
 	/// Read, normalize, and record a file if it is readable and at most 4 MiB.
+	/// GBK-managed files (per the store's encoding policy) are strictly
+	/// decoded; an invalid file records no snapshot rather than mojibake.
 	pub fn record_file(&self, absolute: &Path, seen_lines: Option<&[u32]>) -> Option<String> {
 		if std::fs::metadata(absolute).ok()?.len() > MAX_SNAPSHOT_FILE_BYTES {
 			return None;
 		}
-		let raw = std::fs::read_to_string(absolute).ok()?;
+		let raw = match self.file_encoding(absolute) {
+			None | Some(crate::encoding::TextEncoding::Utf8) => {
+				std::fs::read_to_string(absolute).ok()?
+			},
+			Some(crate::encoding::TextEncoding::Gbk) => {
+				let bytes = std::fs::read(absolute).ok()?;
+				crate::encoding::decode_strict(&bytes, crate::encoding::TextEncoding::Gbk).ok()?
+			},
+		};
 		if raw.len() as u64 > MAX_SNAPSHOT_FILE_BYTES {
 			return None;
 		}

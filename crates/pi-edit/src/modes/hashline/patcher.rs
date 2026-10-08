@@ -24,6 +24,7 @@ use super::{
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
+	encoding::TextEncoding,
 	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
 	error::EditError,
 	files::FileSource,
@@ -697,6 +698,7 @@ pub fn stage_patch(
 		};
 		let mut item =
 			StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
+		item.encoding = (read.encoding != TextEncoding::Utf8).then_some(read.encoding);
 		item.move_to = move_to;
 		item.before_raw = Some(read.raw.clone());
 		item.before.clone_from(&read.text);
@@ -843,6 +845,7 @@ mod lifecycle {
 				plan_writable_roots:  Vec::new(),
 				plan_active:          false,
 				block_auto_generated: false,
+				encoding:             None,
 			};
 			Self { dir, policy, store: EditStore::new() }
 		}

@@ -25,6 +25,7 @@ import {
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { discoverEncodingPolicy, encodeStrict, resolveWriteEncoding } from "../encoding/index";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
@@ -32,7 +33,7 @@ import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
-import { routeWriteThroughBridge } from "../tools/acp-bridge";
+import { hasActiveWriteBridge, routeWriteThroughBridge } from "../tools/acp-bridge";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
 import {
 	deleteFileWithFallback,
@@ -596,6 +597,7 @@ export class EditTool implements AgentTool<TInput> {
 		const specs = router.specs();
 		const urlAliasSchemes: string[] = [];
 		for (const [scheme, spec] of specs) if (spec.singleSlashAlias) urlAliasSchemes.push(scheme);
+		const encoding = discoverEncodingPolicy(this.session.cwd);
 		return {
 			cwd: this.session.cwd,
 			mode: this.mode,
@@ -609,6 +611,8 @@ export class EditTool implements AgentTool<TInput> {
 			planWritableRoots: router.sandboxRoots(context),
 			homeDir: os.homedir(),
 			rawInput,
+			encodingRoot: encoding?.root,
+			encodingJson: encoding?.json,
 		};
 	}
 
@@ -638,6 +642,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		const gbk = request.encoding === "gbk";
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
@@ -668,7 +673,14 @@ export class EditTool implements AgentTool<TInput> {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
-			await writeFileWithFallback(request.moveTo, request.content);
+			// The destination persists with the source's encoding (the engine
+			// resolved it before staging the move).
+			await writeFileWithFallback(
+				request.moveTo,
+				request.content,
+				undefined,
+				resolveWriteEncoding(request.moveTo, false),
+			);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
@@ -693,14 +705,27 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const bridge = await routeWriteThroughBridge(
-			this.session,
-			request.displayPath,
-			request.path,
-			request.content,
-			signal,
-		);
-		if (bridge) return { written: bridge.text };
+		if (gbk) {
+			// ACP clients save whole buffers through their own transport with no
+			// encoding contract; routing GBK text through one would land UTF-8
+			// bytes over a GBK file. Refuse before the bridge writes (P08
+			// support matrix, docs/gbk-handoff).
+			if (await hasActiveWriteBridge(this.session, request.displayPath, request.path)) {
+				throw new ToolError(
+					`${request.displayPath} is a GBK-managed file; the active ACP bridge does not preserve its encoding on save. Disable the bridge for this project or add an encoding-policy override with "utf8".`,
+					{ path: request.path },
+				);
+			}
+		} else {
+			const bridge = await routeWriteThroughBridge(
+				this.session,
+				request.displayPath,
+				request.path,
+				request.content,
+				signal,
+			);
+			if (bridge) return { written: bridge.text };
+		}
 
 		// The pre-image is the only way to tell "the write never landed" from
 		// "something else rewrote the file"; a stat cannot (coarse mtimes).
@@ -741,16 +766,14 @@ export class EditTool implements AgentTool<TInput> {
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-			if (
-				postWriteBytes !== undefined &&
-				bytesEqual(postWriteBytes, preWriteBytes) &&
-				(Buffer.byteLength(request.content, "utf8") !== preWriteBytes.byteLength ||
-					!bytesEqual(Buffer.from(request.content, "utf8"), preWriteBytes))
-			) {
-				throw new ToolError(
-					`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
-					{ path: request.path },
-				);
+			if (postWriteBytes !== undefined && bytesEqual(postWriteBytes, preWriteBytes)) {
+				const expectedBytes = gbk ? encodeStrict(request.content, "gbk") : Buffer.from(request.content, "utf8");
+				if (expectedBytes.byteLength !== preWriteBytes.byteLength || !bytesEqual(expectedBytes, preWriteBytes)) {
+					throw new ToolError(
+						`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
+						{ path: request.path },
+					);
+				}
 			}
 		}
 
