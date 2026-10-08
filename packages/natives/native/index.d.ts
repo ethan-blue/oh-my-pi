@@ -164,6 +164,12 @@ export declare class EditSession {
 export declare class EditStore {
   constructor()
   /**
+   * Set the encoding policy `recordSnapshotFile` decodes managed files
+   * with; pass null/undefined to restore UTF-8-only behavior. Invalid
+   * policy JSON throws.
+   */
+  setEncodingPolicy(root?: string | undefined | null, json?: string | undefined | null): void
+  /**
    * Record `text` (any line endings) as the current snapshot of
    * `absolutePath` and return its 4-hex tag.
    */
@@ -194,6 +200,27 @@ export declare class EditStore {
   invalidate(absolutePath: string): void
   relocate(from: string, to: string): void
   clear(): void
+}
+
+/**
+ * A compiled `.omp/encoding.json` bound to one project root. Cheap to
+ * query; create one per project and reuse it.
+ */
+export declare class EncodingPolicy {
+  /**
+   * Compile `json` (raw `.omp/encoding.json` contents) against the
+   * project `root`. Fails on schema violations, unknown encodings, and
+   * invalid globs — never silently falls back to UTF-8.
+   */
+  constructor(root: string, json: string)
+  /**
+   * Encoding `path` persists with: `"utf8"`, `"gbk"`, or `null` when the
+   * policy does not manage the path (upstream behavior). `exists=false`
+   * applies the new-file rule.
+   */
+  resolve(path: string, exists: boolean): string | null
+  /** Absolute policy root the globs are relative to. */
+  get root(): string
 }
 
 /**
@@ -847,6 +874,8 @@ export interface AstFindOptions {
    * when absent).
    */
   filesystem?: ShellFilesystem
+  /** Project encoding policy: GBK-managed files decode before parsing. */
+  encodingPolicy?: EncodingPolicyOptions
 }
 
 /** Aggregated search statistics and any parse or compile diagnostics. */
@@ -1015,6 +1044,11 @@ export interface AstReplaceOptions {
    * (native when absent).
    */
   filesystem?: ShellFilesystem
+  /**
+   * Project encoding policy: GBK-managed files decode before parsing and
+   * re-encode (strictly) on write.
+   */
+  encodingPolicy?: EncodingPolicyOptions
 }
 
 /** Summary of an ast-grep rewrite pass, including whether disk writes occurred. */
@@ -1561,6 +1595,16 @@ export interface EditPolicy {
   homeDir: string
   /** The payload is a verbatim custom-format string, not JSON. */
   rawInput: boolean
+  /**
+   * Project encoding policy root (absolute) — the directory containing
+   * `.omp/encoding.json`. Required with `encoding_json`.
+   */
+  encodingRoot?: string
+  /**
+   * Raw `.omp/encoding.json` contents; the session compiles and enforces
+   * the same policy the TypeScript shell resolved.
+   */
+  encodingJson?: string
 }
 
 /** A batch of previews for one session generation. */
@@ -1593,7 +1637,12 @@ export interface EditWriteRequest {
   moveTo?: string
   /** Final bytes as text; null for `delete`. */
   content?: string
-  /** Last write of this call and the LSP batch requested a flush. */
+  /**
+   * Charset the host must persist `content` with: `"gbk"` or null (UTF-8).
+   * The engine already strictly validated GBK encodability; the host
+   * encodes the same text at its disk sink.
+   */
+  encoding?: string
   flushLsp: boolean
   lspBatchId?: string
 }
@@ -1687,6 +1736,35 @@ export declare enum Encoding {
   Glm5 = 'Glm5',
   /** `TypeSafe` Jev 1.13 judgment `state` (request frame excluded). */
   Jev = 'Jev'
+}
+
+/**
+ * Whether `text` is fully representable in `encoding` (pre-flight check
+ * used by write paths that report before touching disk).
+ */
+export declare function encodingCanEncode(text: string, encoding: string): boolean
+
+/**
+ * Strictly decode `bytes` (`"utf8"` or `"gbk"`) to text; rejects invalid
+ * sequences with the byte offset instead of substituting replacement
+ * characters.
+ */
+export declare function encodingDecodeStrict(bytes: Uint8Array, encoding: string): string
+
+/**
+ * Strictly encode `text` (`"utf8"` or `"gbk"`) to bytes; rejects characters
+ * the encoding cannot represent instead of substituting `?` or HTML numeric
+ * references. The result always decodes back to exactly `text`.
+ */
+export declare function encodingEncodeStrict(text: string, encoding: string): Uint8Array
+
+/**
+ * Raw policy input for option structs (grep/ast/edit): the project root plus
+ * the `.omp/encoding.json` contents. Compiled once per call.
+ */
+export interface EncodingPolicyOptions {
+  root: string
+  json: string
 }
 
 /**
@@ -1955,6 +2033,12 @@ export interface GrepOptions {
    * reached.
    */
   maxCountPerFile?: number
+  /**
+   * Project encoding policy (`.omp/encoding.json`): GBK-managed files are
+   * transcoded to UTF-8 (lossily, search-only) before matching, so Chinese
+   * patterns match and result lines render correctly.
+   */
+  encodingPolicy?: EncodingPolicyOptions
   /** Abort signal for cancelling the operation. */
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
