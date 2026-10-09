@@ -206,6 +206,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		retainFullStderr = exposeStderr,
 		terminateGroup = false,
 		hardKillTree = false,
+		private readonly onOutput?: (chunk: string) => void,
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
@@ -239,13 +240,17 @@ export class ChildProcess<In extends InMask = InMask> {
 					const r = await reader.read();
 					if (r.done) break;
 					this.#stderrChunks?.push(r.value);
-					this.#stderrTail += dec.decode(r.value, { stream: true });
+					const text = dec.decode(r.value, { stream: true });
+					this.onOutput?.(text);
+					this.#stderrTail += text;
 					trim();
 				}
 			} catch {}
 			this.#pipeReaders.delete(reader);
 			this.#openPipeReaders--;
-			this.#stderrTail += dec.decode();
+			const tail = dec.decode();
+			this.onOutput?.(tail);
+			this.#stderrTail += tail;
 			trim();
 		})();
 
@@ -446,14 +451,21 @@ export class ChildProcess<In extends InMask = InMask> {
 				}
 				const r = await reader.read();
 				if (r.done) break;
-				out += dec.decode(r.value, { stream: true });
+				const text = dec.decode(r.value, { stream: true });
+				if (this.onOutput) this.onOutput(text);
+				else out += text;
 			}
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
 		this.#pipeReaders.delete(reader);
 		this.#openPipeReaders--;
-		return out + dec.decode();
+		const tail = dec.decode();
+		if (this.onOutput) {
+			this.onOutput(tail);
+			return "";
+		}
+		return out + tail;
 	}
 
 	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
@@ -620,6 +632,8 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	subreaper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
+	/** Stream decoded output without retaining stdout; stderr keeps its bounded error tail. */
+	onOutput?: (chunk: string) => void;
 };
 
 function spawnInternal<In extends InMask = InMask>(
@@ -627,7 +641,7 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, onOutput, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
 	const commandEnv = rest.env ?? Bun.env;
 	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
@@ -646,7 +660,7 @@ function spawnInternal<In extends InMask = InMask>(
 				}
 			: rest.env,
 	});
-	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
+	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper, onOutput);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

@@ -128,6 +128,14 @@ export function encodeStrict(text: string, encoding: ManagedEncoding): Uint8Arra
 	return encodingEncodeStrict(text, encoding);
 }
 
+/** Reject lossy normalization of valid but noncanonical GBK byte sequences. */
+export function assertStableGbkBytes(bytes: Uint8Array, filePath: string): void {
+	const encoded = encodeStrict(decodeStrict(bytes, "gbk"), "gbk");
+	if (!Buffer.from(bytes).equals(Buffer.from(encoded))) {
+		throw new Error(`${filePath}: GBK bytes are not round-trip stable; refusing to normalize untouched bytes`);
+	}
+}
+
 /**
  * Read a file's text through the encoding policy: managed GBK files are
  * strictly decoded, everything else keeps upstream UTF-8 semantics. A leading

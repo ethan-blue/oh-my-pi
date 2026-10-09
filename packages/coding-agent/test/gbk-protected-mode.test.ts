@@ -14,6 +14,8 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { applyWorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/edits";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import {
 	checkProtectedCommand,
 	protectedCommandDenial,
@@ -283,14 +285,86 @@ describe("R10 protected mode and native recovery (A01–A10)", () => {
 	});
 
 	it("A07: a configured build task runs; a failing build surfaces its exit code", async () => {
-		await fs.writeFile(path.join(tmpDir, ".omp", "protected-mode.json"), PROTECTED, "utf8");
+		await Bun.write(
+			path.join(tmpDir, ".omp", "protected-mode.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				buildTasks: [
+					{ id: "compiler-probe", exe: process.execPath, args: ["--version"] },
+					{ id: "failure-probe", exe: process.execPath, args: ["run", "missing-ompg-probe.ts"] },
+				],
+			}),
+		);
 		const session = makeSession(tmpDir);
 
-		const ok = await new BashTool(session).execute("build-1", { command: "cmd /c echo build-ok" });
-		expect(resultText(ok)).toContain("build-ok");
+		const exe = process.execPath.replaceAll("\\", "/");
+		const ok = await new BashTool(session).execute("build-1", { command: `"${exe}" --version` });
+		expect(resultText(ok)).toContain(Bun.version);
 
-		const fail = await new BashTool(session).execute("build-2", { command: "cmd /c exit 3" });
+		const fail = await new BashTool(session).execute("build-2", { command: `"${exe}" run missing-ompg-probe.ts` });
 		expect(fail.isError).toBe(true);
+	});
+
+	it("session protection survives an outside cwd and configuration writes", async () => {
+		const config = path.join(tmpDir, ".omp", "protected-mode.json");
+		await Bun.write(config, PROTECTED);
+		const session = makeSession(tmpDir);
+		await expect(
+			new BashTool(session).execute("escape", { cwd: os.tmpdir(), command: "echo bypass > escaped.txt" }),
+		).rejects.toThrow("protected mode");
+		await expect(
+			new WriteTool(session).execute("disable", { path: config, content: '{"schemaVersion":1,"enabled":false}' }),
+		).rejects.toThrow("user-managed");
+		expect(await Bun.file(config).text()).toBe(PROTECTED);
+		const edit = await new EditTool(session, "replace").execute("edit-config", {
+			path: config,
+			old_string: '"enabled":true',
+			new_string: '"enabled":false',
+		});
+		expect(edit.isError).toBe(true);
+		const normal = path.join(tmpDir, "normal.txt");
+		await Bun.write(normal, "untouched");
+		await expect(
+			applyWorkspaceEdit(
+				{
+					changes: {
+						[fileToUri(normal)]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+								newText: "changed",
+							},
+						],
+						[fileToUri(config)]: [
+							{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: " " },
+						],
+					},
+				},
+				tmpDir,
+			),
+		).rejects.toThrow("user-managed");
+		expect(await Bun.file(normal).text()).toBe("untouched");
+		expect(await Bun.file(config).text()).toBe(PROTECTED);
+		const alias = path.join(tmpDir, "alias.json");
+		await fs.link(config, alias);
+		await expect(new WriteTool(session).execute("alias", { path: alias, content: "{}" })).rejects.toThrow(
+			"user-managed",
+		);
+	});
+
+	it("a configured executable cannot be replaced by a same-name binary or shell expansion", async () => {
+		const trusted = path.join(tmpDir, "trusted", "probe.exe");
+		const untrusted = path.join(tmpDir, "untrusted", "probe.exe");
+		await Bun.write(trusted, Bun.file(process.execPath));
+		await Bun.write(untrusted, Bun.file(process.execPath));
+		await Bun.write(
+			path.join(tmpDir, ".omp", "protected-mode.json"),
+			JSON.stringify({ schemaVersion: 1, enabled: true, buildTasks: [{ id: "probe", exe: trusted, args: ["*"] }] }),
+		);
+		const command = (exe: string, args: string) => `"${exe.replaceAll("\\", "/")}" ${args}`;
+		expect(checkProtectedCommand(tmpDir, command(untrusted, "--version"))?.denied).toBe(true);
+		expect(checkProtectedCommand(tmpDir, command(trusted, '"`echo bad`"'))?.denied).toBe(true);
+		expect(checkProtectedCommand(tmpDir, command(trusted, "-c source.c"))?.denied).toBe(false);
 	});
 
 	it("A08: the agent cannot widen the gate; native rule recovery still works", async () => {

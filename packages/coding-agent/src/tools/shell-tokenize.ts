@@ -185,6 +185,9 @@ const SHELL_STATEFUL_COMMANDS = new Set([
 ]);
 
 const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
+	cmd: true,
+	powershell: true,
+	pwsh: true,
 	ash: true,
 	bash: true,
 	busybox: true,
@@ -214,7 +217,11 @@ const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
  * mutate the current shell. Rejection is a normal result: callers must retain
  * their existing approval behavior.
  */
-export function extractLiteralAndChainSegments(command: string): LiteralShellCommandSegment[] | null {
+export function extractLiteralAndChainSegments(
+	command: string,
+	minimumSegments = 2,
+	rejectReinterpretOptions = true,
+): LiteralShellCommandSegment[] | null {
 	for (let i = 0; i < command.length; i++) {
 		const code = command.charCodeAt(i);
 		if ((code < 0x20 && code !== 0x09) || code === 0x7f) return null;
@@ -237,10 +244,14 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 		if (argv.length === 0) return false;
 		const executable = argv[0];
 		if (executable.length === 0) return false;
-		const commandName = executable.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1);
+		const commandName = executable
+			.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1)
+			.replace(/\.exe$/i, "")
+			.toLowerCase();
 		if (
 			argv.some(argument => SHELL_ASSIGNMENT.test(argument)) ||
-			argv.some((argument, index) => index > 0 && SHELL_REINTERPRET_OPTION.test(argument)) ||
+			(rejectReinterpretOptions &&
+				argv.some((argument, index) => index > 0 && SHELL_REINTERPRET_OPTION.test(argument))) ||
 			SHELL_STATEFUL_COMMANDS.has(commandName) ||
 			Object.hasOwn(SHELL_INTERPRETER_COMMANDS, commandName)
 		) {
@@ -333,7 +344,7 @@ export function extractLiteralAndChainSegments(command: string): LiteralShellCom
 		tokenStarted = true;
 	}
 
-	if (quote || !pushSegment(command.length) || segments.length < 2) return null;
+	if (quote || !pushSegment(command.length) || segments.length < minimumSegments) return null;
 	return segments;
 }
 

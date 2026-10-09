@@ -33,6 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { extractLiteralAndChainSegments } from "./shell-tokenize";
 
 export interface ProtectedBuildTask {
 	id: string;
@@ -112,6 +113,7 @@ function parseConfig(json: string): ProtectedModeConfig {
 	if (typeof raw !== "object" || raw === null) throw new Error("config must be an object");
 	const record = raw as Record<string, unknown>;
 	if (record.schemaVersion !== 1) throw new Error("schemaVersion must be 1");
+	if (typeof record.enabled !== "boolean") throw new Error("enabled must be a boolean");
 	const enabled = record.enabled === true;
 	const tasksRaw = Array.isArray(record.buildTasks) ? record.buildTasks : [];
 	const buildTasks: ProtectedBuildTask[] = tasksRaw.map((entry, index) => {
@@ -138,50 +140,8 @@ function parseConfig(json: string): ProtectedModeConfig {
  * `&&`, backticks, newlines are not).
  */
 export function tokenizeSimpleCommand(command: string): string[] | undefined {
-	const tokens: string[] = [];
-	let current = "";
-	let hasCurrent = false;
-	let index = 0;
-	while (index < command.length) {
-		const ch = command[index]!;
-		if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
-			if (hasCurrent) {
-				tokens.push(current);
-				current = "";
-				hasCurrent = false;
-			}
-			index++;
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			const quote = ch;
-			index++;
-			let closed = false;
-			while (index < command.length) {
-				const inner = command[index]!;
-				if (inner === quote) {
-					closed = true;
-					index++;
-					break;
-				}
-				if (quote === '"' && inner === "$") return undefined; // expansions refused
-				current += inner;
-				hasCurrent = true;
-				index++;
-			}
-			if (!closed) return undefined;
-			continue;
-		}
-		if ("|&;<>()$`\\#*?[]~=".includes(ch)) {
-			// Metacharacters and glob expansions make the command unverifiable.
-			return undefined;
-		}
-		current += ch;
-		hasCurrent = true;
-		index++;
-	}
-	if (hasCurrent) tokens.push(current);
-	return tokens.length > 0 ? tokens : undefined;
+	const segments = extractLiteralAndChainSegments(command, 1, false);
+	return segments?.length === 1 ? segments[0].argv : undefined;
 }
 
 function argMatches(pattern: string, arg: string): boolean {
@@ -190,17 +150,14 @@ function argMatches(pattern: string, arg: string): boolean {
 	return arg.startsWith(prefix);
 }
 
-function exeMatches(configured: string, invoked: string): boolean {
-	if (configured === invoked) return true;
-	const configuredBase = path
-		.basename(configured)
-		.replace(/\.exe$/i, "")
-		.toLowerCase();
-	const invokedBase = path
-		.basename(invoked)
-		.replace(/\.exe$/i, "")
-		.toLowerCase();
-	return configuredBase === invokedBase;
+function resolveExecutable(executable: string, cwd: string): string | undefined {
+	const resolved = Bun.which(executable, { cwd });
+	if (!resolved || /\.(cmd|bat|ps1)$/i.test(resolved)) return undefined;
+	try {
+		return fs.realpathSync(resolved);
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -211,9 +168,21 @@ function exeMatches(configured: string, invoked: string): boolean {
 export function checkProtectedCommand(
 	cwd: string,
 	command: string,
-): { denied: false } | { denied: true; reason: string } | undefined {
+	executionCwd = cwd,
+): { denied: false; argv: string[] } | { denied: true; reason: string } | undefined {
 	const discovered = discoverProtectedMode(cwd);
 	if (!discovered || !discovered.config.enabled) return undefined;
+	let realRoot: string, realCwd: string;
+	try {
+		realRoot = fs.realpathSync(discovered.root);
+		realCwd = fs.realpathSync(executionCwd);
+	} catch {
+		return { denied: true, reason: "protected mode: execution cwd cannot be resolved" };
+	}
+	const relative = path.relative(realRoot, realCwd);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		return { denied: true, reason: "protected mode: execution cwd must remain inside the protected project" };
+	}
 
 	const tokens = tokenizeSimpleCommand(command);
 	if (!tokens) {
@@ -227,8 +196,9 @@ export function checkProtectedCommand(
 		};
 	}
 	const [invokedExe, ...invokedArgs] = tokens;
+	const executable = resolveExecutable(invokedExe!, executionCwd);
 	for (const task of discovered.config.buildTasks) {
-		if (!exeMatches(task.exe, invokedExe!)) continue;
+		if (!executable || resolveExecutable(task.exe, discovered.root) !== executable) continue;
 		const lastIsGlob = task.args.length > 0 && task.args[task.args.length - 1]!.endsWith("*");
 		if (!lastIsGlob && invokedArgs.length > task.args.length) continue;
 		if (invokedArgs.length < task.args.length - (lastIsGlob ? 1 : 0)) continue;
@@ -241,7 +211,7 @@ export function checkProtectedCommand(
 			}
 		}
 		if (matched) {
-			return { denied: false };
+			return { denied: false, argv: [executable, ...invokedArgs] };
 		}
 	}
 	return {
@@ -251,6 +221,44 @@ export function checkProtectedCommand(
 			`configured build task (allowed: ${discovered.config.buildTasks.map(t => t.id).join(", ") || "none"}). ` +
 			`File work must use the native read/edit/write/search tools.`,
 	};
+}
+
+/** Agent tools cannot change the control plane that grants their execution rights. */
+export function assertProtectedConfigMutation(filePath: string): void {
+	const absolute = path.resolve(filePath);
+	let canonical = absolute;
+	try {
+		canonical = fs.realpathSync(absolute);
+	} catch {
+		try {
+			canonical = path.join(fs.realpathSync(path.dirname(absolute)), path.basename(absolute));
+		} catch {
+			/* New ancestors. */
+		}
+	}
+	const policy = discoverProtectedMode(path.dirname(absolute));
+	if (policy) {
+		let target: fs.Stats | undefined;
+		let config: fs.Stats | undefined;
+		try {
+			target = fs.statSync(absolute);
+			config = fs.statSync(path.join(policy.root, CONFIG_RELATIVE));
+		} catch {
+			/* A new target has no hardlink identity. Lexical checks still apply below. */
+		}
+		if (target && config && target.dev === config.dev && target.ino === config.ino)
+			throw new Error("protected mode configuration is user-managed; agent tools cannot modify it");
+	}
+	for (const candidate of [absolute, canonical]) {
+		if (
+			candidate.replaceAll("\\", "/").toLowerCase().endsWith("/.omp/protected-mode.json") ||
+			fs.existsSync(path.join(candidate, CONFIG_RELATIVE)) ||
+			(path.basename(candidate).toLowerCase() === ".omp" &&
+				fs.existsSync(path.join(candidate, "protected-mode.json")))
+		) {
+			throw new Error("protected mode configuration is user-managed; agent tools cannot modify or remove it");
+		}
+	}
 }
 
 /**

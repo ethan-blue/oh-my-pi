@@ -468,6 +468,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
+				if (protectedEvalDenial(this.session.cwd)) return undefined;
 				// The coordinator also exists for `task.speculativeLaunch`; eval shadows
 				// belong to the read/eval speculation slice only.
 				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
@@ -523,6 +524,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError(`Validation failed for tool "eval": ${validated.summary}`);
 		}
 		params = validated;
+		const protectedDenial = this.session && protectedEvalDenial(this.session.cwd);
+		if (protectedDenial) throw new ToolError(protectedDenial);
 
 		const shadowCell = this.#shadowCells.get(_toolCallId);
 		this.#shadowCells.delete(_toolCallId);

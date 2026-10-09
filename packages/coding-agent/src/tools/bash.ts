@@ -20,7 +20,8 @@ import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
-import { protectedCommandDenial } from "./protected-mode";
+import { checkProtectedCommand } from "./protected-mode";
+import { executeProtectedBuild } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -1022,11 +1023,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
 		// R10 protected mode: refuse BEFORE any process is spawned when the
 		// project opted in and the command is not a configured build task.
-		if (virtualCwd === undefined) {
-			const denial = protectedCommandDenial(commandCwd, command);
-			if (denial !== undefined) {
-				throw new ToolError(denial);
-			}
+		const protectedVerdict =
+			checkProtectedCommand(this.session.cwd, command, commandCwd) ??
+			(virtualCwd === undefined ? checkProtectedCommand(commandCwd, command) : undefined);
+		if (protectedVerdict?.denied) throw new ToolError(protectedVerdict.reason);
+		if (protectedVerdict && (virtualCwd !== undefined || name !== undefined || pty || asyncRequested)) {
+			throw new ToolError("protected mode builds require a local, foreground invocation without a PTY");
 		}
 		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
@@ -1110,6 +1112,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
+		if (protectedVerdict && !protectedVerdict.denied) {
+			const result = await executeProtectedBuild(protectedVerdict.argv, {
+				cwd: commandCwd,
+				signal,
+				timeout: timeoutMs,
+			});
+			return this.#buildCompletedResult(result, timeoutSec, { notices: pendingNotices });
+		}
 		if (asyncRequested) {
 			if (!this.session.asyncJobManager) {
 				throw new ToolError("Async job manager unavailable for this session.");

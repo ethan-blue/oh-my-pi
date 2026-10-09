@@ -16,7 +16,8 @@ param(
     [string]$Version,
     [switch]$Download,
     [switch]$Uninstall,
-    [string]$InstallDir
+    [string]$InstallDir,
+    [switch]$NoPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +29,24 @@ if ($PSVersionTable.PSVersion -lt [version]"5.1") {
 $Repo = "ethan-blue/oh-my-pi"
 
 $Root = if ($InstallDir) { $InstallDir } elseif ($env:OMPG_INSTALL_DIR) { $env:OMPG_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "ompg" }
+$Root = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+foreach ($danger in @([System.IO.Path]::GetPathRoot($Root), $env:USERPROFILE, $env:LOCALAPPDATA, $env:TEMP, $env:SystemRoot, $env:ProgramFiles, (Join-Path $env:LOCALAPPDATA 'omp'))) {
+    if ($danger -and $Root -ieq [System.IO.Path]::GetFullPath($danger).TrimEnd('\')) {
+        throw "Refusing unsafe install root: $Root"
+    }
+}
+# Never follow an existing junction/symlink into another installation.
+$ancestor = $Root
+while ($ancestor) {
+    if ((Test-Path -LiteralPath $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing reparse point in install path: $ancestor"
+    }
+    $ancestor = Split-Path -Parent $ancestor
+}
 $VersionsDir = Join-Path $Root "versions"
+if ((Test-Path -LiteralPath $VersionsDir) -and ((Get-Item -LiteralPath $VersionsDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "Refusing reparse point: $VersionsDir"
+}
 
 function Write-Step { param([string]$Message) Write-Host "[ompg] $Message" }
 
@@ -55,23 +73,26 @@ if ($Uninstall) {
     ) | Where-Object { $_ }
     foreach ($danger in $dangerous) {
         if ($normalizedRoot -ieq [System.IO.Path]::GetFullPath($danger)) {
-            throw "Refusing to uninstall from $Root: it is a system/user root, not an ompg install directory."
+            throw "Refusing to uninstall from ${Root}: it is a system/user root, not an ompg install directory."
         }
     }
     if ($normalizedRoot -ieq [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "omp"))) {
         throw "Refusing to uninstall: $Root is the ORIGINAL omp install directory; ompg never touches it."
     }
     $markers = @()
-    if (Test-Path -LiteralPath (Join-Path $Root "versions"))) {
-        $markers = Get-ChildItem -LiteralPath (Join-Path $Root "versions") -Filter "install.json" -Recurse -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $VersionsDir) {
+        $markers = @(Get-ChildItem -LiteralPath $VersionsDir -Directory | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object {
+            Get-Item -LiteralPath (Join-Path $_.FullName 'install.json') -ErrorAction SilentlyContinue
+        })
     }
     $owned = @($markers | Where-Object {
         try {
-            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).repository -eq $Repo
+            $marker = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+            -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and ($marker.repo -eq $Repo -or $marker.repository -eq $Repo)
         } catch { $false }
     })
     if ($owned.Count -eq 0) {
-        throw "Refusing to uninstall $Root: no ompg install marker found (versions\<version>\install.json naming $Repo). Not an ompg-managed directory; nothing was deleted."
+        throw "Refusing to uninstall ${Root}: no ompg install marker found (versions\<version>\install.json naming $Repo). Not an ompg-managed directory; nothing was deleted."
     }
     Write-Step "Uninstall verified: $($owned.Count) ompg install marker(s) in $Root"
 
@@ -83,18 +104,24 @@ if ($Uninstall) {
             $removed += $entry
         }
     }
-    try {
-            Remove-Item -LiteralPath (Join-Path $Root "versions") -Recurse -Force -ErrorAction Stop
-        } catch {
-            Write-Step "Could not fully remove versions\ (is ompg still running?); re-run the uninstaller after closing ompg."
+    foreach ($markerFile in $owned) {
+        $versionPath = $markerFile.DirectoryName
+        $ownedExe = Join-Path $versionPath 'ompg.exe'
+        if (Test-Path -LiteralPath $ownedExe) {
+            if ((Get-Item -LiteralPath $ownedExe -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing reparse point: $ownedExe" }
+            Remove-Item -LiteralPath $ownedExe -Force -ErrorAction Stop
         }
+        Remove-Item -LiteralPath $markerFile.FullName -Force -ErrorAction Stop
+        if (@(Get-ChildItem -LiteralPath $versionPath -Force).Count -eq 0) { [IO.Directory]::Delete($versionPath) }
+    }
+    if (@(Get-ChildItem -LiteralPath $VersionsDir -Force).Count -eq 0) { [IO.Directory]::Delete($VersionsDir) }
     # Report anything else the installer never created instead of deleting it.
     $known = @("ompg.cmd", "ompg.exe", "versions")
     $leftovers = @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Name })
     if ($Leftovers.Count -gt 0) {
             Write-Step "Kept $($Leftovers.Count) file(s) this installer did not create: $($Leftovers.Name -join ', ')"
         }
-    Remove-PathEntry -Entry $Root
+    if (-not $NoPath) { Remove-PathEntry -Entry $Root }
     Write-Step "Uninstalled (removed: $($removed -join ', ')). User data (~\.ompg) and the original omp installation were left untouched; delete ~\.ompg manually to remove sessions and caches."
     exit 0
 }
@@ -109,7 +136,8 @@ if ($Download) {
     $tag = "v$Version"
     $archiveName = "ompg-$Version-windows-$NativeArchitecture.zip"
     $sumsName = "SHA256SUMS.txt"
-    $work = Join-Path ([System.IO.Path]::GetTempPath()) "ompg-install-$Version"
+    if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-]*$') { throw 'Invalid version.' }
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("ompg-install-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     foreach ($name in @($archiveName, $sumsName)) {
         $url = "https://github.com/$Repo/releases/download/$tag/$name"
@@ -117,8 +145,9 @@ if ($Download) {
         Invoke-WebRequest -Uri $url -OutFile (Join-Path $work $name) -UseBasicParsing
     }
     $sumsPath = Join-Path $work $sumsName
-    $expected = (Get-Content $sumsPath | Where-Object { $_ -match [regex]::Escape($archiveName) }) -replace '^\s*([0-9A-Fa-f]+).*$', '$1'
-    if (-not $expected) { throw "SHA256SUMS.txt has no entry for $archiveName." }
+    $rows = @(Get-Content -LiteralPath $sumsPath | Where-Object { $_ -match ('^[0-9A-Fa-f]{64}\s+\*?' + [regex]::Escape($archiveName) + '$') })
+    if ($rows.Count -ne 1) { throw "SHA256SUMS.txt must have exactly one entry for $archiveName." }
+    $expected = $rows[0].Substring(0,64)
     $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $work $archiveName)).Hash
     if ($actual -ine $expected) { throw "Checksum mismatch for ${archiveName}: expected $expected, got $actual." }
     Write-Step "Checksum verified"
@@ -129,10 +158,8 @@ if ($Download) {
     if (Test-Path -LiteralPath (Join-Path $work "ompg.exe")) {
         $PSScriptRootForFiles = $work
     } else {
-        $nested = Get-ChildItem -LiteralPath $work -Directory |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "ompg.exe") } |
-            Select-Object -First 1
-        if ($nested) { $PSScriptRootForFiles = $nested.FullName }
+        $nested = Join-Path $work "ompg-$Version-windows-$NativeArchitecture"
+        if (Test-Path -LiteralPath (Join-Path $nested 'ompg.exe')) { $PSScriptRootForFiles = $nested }
         else { throw "Extracted archive has no ompg.exe under $work." }
     }
 } else {
@@ -144,6 +171,17 @@ if ($Download) {
 $exeSource = Join-Path $PSScriptRootForFiles "ompg.exe"
 if (-not (Test-Path -LiteralPath $exeSource)) { throw "ompg.exe not found next to install-ompg.ps1 (looked in $PSScriptRootForFiles). Use -Download to fetch a release." }
 
+# Verify a shipped executable checksum before executing any downloaded code.
+$sumsLocal = Join-Path $PSScriptRootForFiles "SHA256SUMS.txt"
+if (Test-Path -LiteralPath $sumsLocal) {
+    $rows = @(Get-Content -LiteralPath $sumsLocal | Where-Object { $_ -match '^[0-9A-Fa-f]{64}\s+\*?(?:[^\s]*[/\\])?ompg\.exe$' })
+    if ($rows.Count -ne 1) { throw 'SHA256SUMS.txt must contain exactly one ompg.exe entry.' }
+    $expectedExe = $rows[0].Substring(0,64)
+    $actualExe = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeSource).Hash
+    if ($actualExe -ine $expectedExe) { throw "Checksum mismatch for ompg.exe: expected $expectedExe, got $actualExe." }
+    Write-Step "ompg.exe checksum verified"
+}
+
 # Version: prefer the binary's own report — the installer must never guess.
 $detected = & $exeSource --version 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $detected) { throw "Could not read the version from the shipped ompg.exe." }
@@ -154,21 +192,18 @@ if ($Version -and $Version -ne $shortVersion) {
     throw "Version mismatch: -Version said $Version but the binary reports $shortVersion."
 }
 
-# Optional checksum verification when SHA256SUMS.txt ships alongside.
-$sumsLocal = Join-Path $PSScriptRootForFiles "SHA256SUMS.txt"
-if (Test-Path -LiteralPath $sumsLocal) {
-    $row = Get-Content $sumsLocal | Where-Object { $_ -match '(^|[/\\])ompg\.exe$' } | Select-Object -First 1
-    if ($row) {
-        $expectedExe = $row -replace '^\s*([0-9A-Fa-f]+).*$', '$1'
-        $actualExe = (Get-FileHash -Algorithm SHA256 $exeSource).Hash
-        if ($actualExe -ine $expectedExe) { throw "Checksum mismatch for ompg.exe: expected $expectedExe, got $actualExe." }
-        Write-Step "ompg.exe checksum verified"
-    }
-}
-
 $versionDir = Join-Path $VersionsDir $shortVersion
+if ((Test-Path -LiteralPath $versionDir) -and ((Get-Item -LiteralPath $versionDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Refusing reparse point: $versionDir" }
 New-Item -ItemType Directory -Force -Path $versionDir | Out-Null
-Copy-Item -LiteralPath $exeSource -Destination (Join-Path $versionDir "ompg.exe") -Force
+$targetExe = Join-Path $versionDir "ompg.exe"
+if (Test-Path -LiteralPath $targetExe) {
+    if ((Get-Item -LiteralPath $targetExe -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing reparse point: $targetExe" }
+    if ((Get-FileHash -LiteralPath $targetExe).Hash -ne (Get-FileHash -LiteralPath $exeSource).Hash) { throw 'An installed version cannot be replaced with different bytes. Publish a new version.' }
+} else {
+    Copy-Item -LiteralPath $exeSource -Destination $targetExe -ErrorAction Stop
+}
+@{ version = $shortVersion; repo = $Repo; installedAt = (Get-Date).ToString("o") } | ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $versionDir "install.json") -Encoding UTF8
 Write-Step "Installed ompg $shortVersion to $versionDir"
 
 # Stable launchers at the root: a .cmd shim plus a hardlink when the volume
@@ -179,12 +214,11 @@ $tmpCmd = "$cmdPath.tmp"
 @"
 @echo off
 setlocal
-set "OMPG_HOME=$Root"
 "%~dp0versions\$shortVersion\ompg.exe" %*
 "@ | Set-Content -LiteralPath $tmpCmd -Encoding ASCII
-Move-Item -LiteralPath $tmpCmd -Destination $cmdPath -Force
 $rootExe = Join-Path $Root "ompg.exe"
-if (Test-Path -LiteralPath $rootExe) { Remove-Item -LiteralPath $rootExe -Force -ErrorAction SilentlyContinue }
+if (Test-Path -LiteralPath $rootExe) { Remove-Item -LiteralPath $rootExe -Force -ErrorAction Stop }
+Move-Item -LiteralPath $tmpCmd -Destination $cmdPath -Force
 try {
     New-Item -ItemType HardLink -Path $rootExe -Target $targetExe -ErrorAction Stop | Out-Null
 } catch {
@@ -197,16 +231,12 @@ try {
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not $userPath) { $userPath = "" }
 $already = $userPath.Split(";") | Where-Object { $_ -and ($_.TrimEnd("\") -ieq $Root.TrimEnd("\")) }
-if (-not $already) {
+if (-not $already -and -not $NoPath) {
     [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $Root).TrimStart(";"), "User")
     Write-Step "Added $Root to the user PATH"
-} else {
+} elseif (-not $NoPath) {
     Write-Step "$Root already on PATH"
 }
-
-# Completion marker, written only after every file landed.
-@{ version = $shortVersion; repo = $Repo; installedAt = (Get-Date).ToString("o") } | ConvertTo-Json |
-    Set-Content -LiteralPath (Join-Path $versionDir "install.json") -Encoding UTF8
 
 Write-Step "Done. Start a new terminal and run: ompg --version"
 Write-Step "To enable GBK for a project, create .omp\encoding.json there (see encoding.example.json in the release archive)."

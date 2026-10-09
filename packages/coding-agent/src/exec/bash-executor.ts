@@ -13,6 +13,7 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
+import { ptree } from "@oh-my-pi/pi-utils";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -516,6 +517,35 @@ async function executeUserShellPty(run: {
 		cancelled: false,
 		...(await run.dump()),
 	};
+}
+
+/** Execute the exact checked argv, bypassing shell startup, direnv and ACP delegation. */
+export async function executeProtectedBuild(argv: string[], options: BashExecutorOptions): Promise<BashResult> {
+	const settings = await Settings.init();
+	const sink = new OutputSink({
+		headBytes: resolveOutputSinkHeadBytes(settings),
+		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
+		maxColumns: resolveOutputMaxColumns(settings),
+	});
+	try {
+		const result = await ptree.exec(argv, {
+			cwd: options.cwd,
+			signal: options.signal,
+			timeout: options.timeout,
+			env: buildNonInteractiveEnv(),
+			allowAbort: true,
+			allowNonZero: true,
+			onOutput: chunk => sink.push(chunk),
+		});
+		return {
+			...(await sink.dump()),
+			exitCode: result.exitCode ?? undefined,
+			cancelled: result.exitError?.aborted ?? false,
+			timedOut: result.exitError instanceof ptree.TimeoutError,
+		};
+	} finally {
+		await sink.dispose();
+	}
 }
 
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {

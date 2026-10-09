@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { assertProtectedConfigMutation } from "../tools/protected-mode";
 import type {
 	AgentTool,
 	AgentToolArgStream,
@@ -642,6 +643,8 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		assertProtectedConfigMutation(request.path);
+		if (request.moveTo) assertProtectedConfigMutation(request.moveTo);
 		const gbk = request.encoding === "gbk";
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));

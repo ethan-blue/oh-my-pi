@@ -9,7 +9,8 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
-import { discoverEncodingPolicy } from "../encoding/index";
+import { assertStableGbkBytes, discoverEncodingPolicy, resolveWriteEncoding } from "../encoding/index";
+import { assertProtectedConfigMutation } from "./protected-mode";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
@@ -146,6 +147,7 @@ function runAstEditOnce(
 		failOnParseError: options.failOnParseError,
 		signal: options.signal,
 		filesystem: options.filesystem,
+		encodingPolicy: options.encodingPolicy,
 	});
 }
 
@@ -302,6 +304,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
+			const validateChanges = async (preview: AstEditAggregatedResult) => {
+				for (const change of preview.fileChanges) {
+					const target = await resultSnapshotPath(formatPath(change.path), this.session.cwd, resolveContext);
+					if (!target) continue; // Non-local URL backends retain their own write contract.
+					assertProtectedConfigMutation(target);
+					if (resolveWriteEncoding(target, true) === "gbk")
+						assertStableGbkBytes(await Bun.file(target).bytes(), target);
+				}
+			};
+			await validateChanges(result);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
@@ -438,6 +450,15 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						// The apply outlives the preview call: its filesystem carries no signal.
 						const applyContext = sessionResolveContext(this.session);
+						const freshPreview = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+							rewrites: normalizedRewrites,
+							dryRun: true,
+							maxFiles,
+							failOnParseError: false,
+							encodingPolicy,
+							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+						});
+						await validateChanges(freshPreview);
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,

@@ -4278,7 +4278,7 @@ describe("lsp regressions", () => {
 			await Bun.write(filePath, "SOURCE");
 
 			const linkDir = path.join(tempDir.path(), "dirlink");
-			fs.symlinkSync(realDir, linkDir);
+			fs.symlinkSync(realDir, linkDir, process.platform === "win32" ? "junction" : "dir");
 			const aliasPath = path.join(linkDir, "f.ts");
 
 			const renameOp: RenameFile = {

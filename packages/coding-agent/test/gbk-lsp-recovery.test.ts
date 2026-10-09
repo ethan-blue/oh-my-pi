@@ -82,6 +82,62 @@ describe("GBK LSP workspace edits and move failure", () => {
 		await removeWithRetries(tmpDir);
 	});
 
+	it("create then edit and rename then edit use the ordered virtual file state", async () => {
+		const original = path.join(tmpDir, "src", "created.c");
+		const renamed = path.join(tmpDir, "src", "renamed.c");
+		await applyWorkspaceEdit(
+			{
+				documentChanges: [
+					{ kind: "create", uri: fileToUri(original) },
+					{
+						textDocument: { uri: fileToUri(original), version: null },
+						edits: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+								newText: "// 中文\nint a = 1;\n",
+							},
+						],
+					},
+					{ kind: "rename", oldUri: fileToUri(original), newUri: fileToUri(renamed) },
+					{
+						textDocument: { uri: fileToUri(renamed), version: null },
+						edits: [
+							{ range: { start: { line: 1, character: 8 }, end: { line: 1, character: 9 } }, newText: "2" },
+						],
+					},
+				],
+			},
+			tmpDir,
+		);
+		expect(await Bun.file(original).exists()).toBe(false);
+		expect(await Bun.file(renamed).bytes()).toEqual(gbk("// 中文\nint a = 2;\n"));
+	});
+
+	it("a noncanonical GBK byte sequence rejects the complete batch without normalizing it", async () => {
+		const good = path.join(tmpDir, "src", "good.c"),
+			ambiguous = path.join(tmpDir, "src", "ambiguous.c");
+		const original = Buffer.from([0x2f, 0x2f, 0xa2, 0xe3, 0x0a, 0x31]);
+		await Bun.write(good, "1");
+		await Bun.write(ambiguous, original);
+		await expect(
+			applyWorkspaceEdit(
+				{
+					changes: {
+						[fileToUri(good)]: [
+							{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "2" },
+						],
+						[fileToUri(ambiguous)]: [
+							{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "2" },
+						],
+					},
+				},
+				tmpDir,
+			),
+		).rejects.toThrow("round-trip stable");
+		expect(await Bun.file(good).text()).toBe("1");
+		expect(Buffer.from(await Bun.file(ambiguous).bytes())).toEqual(original);
+	});
+
 	it("a rename-style workspace edit keeps GBK bytes and encoding (E21)", async () => {
 		const file = path.join(tmpDir, "src", "mod.ts");
 		await Bun.write(file, Buffer.from(gbk("const 值 = 1;\n")));

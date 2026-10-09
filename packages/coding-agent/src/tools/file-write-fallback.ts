@@ -130,7 +130,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
-import { encodeStrict } from "../encoding/index";
+import { assertStableGbkBytes, encodeStrict } from "../encoding/index";
+import { assertProtectedConfigMutation } from "./protected-mode";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { resolveSyscallTarget } from "./path-utils";
 
@@ -312,6 +313,7 @@ export function withFileMutationSession<T>(sessionId: string | undefined, fn: ()
  * must propagate — `edit`'s `REM` turns it into a `NotFoundError`.
  */
 export async function deleteFileWithFallback(dst: string, file?: BunFile): Promise<void> {
+	assertProtectedConfigMutation(dst);
 	try {
 		if (file) {
 			await file.unlink();
@@ -421,8 +423,14 @@ export async function writeFileWithFallback(
 	file?: BunFile,
 	encoding?: "gbk",
 ): Promise<void> {
+	assertProtectedConfigMutation(dst);
 	let payload: string | Uint8Array = content;
 	if (encoding === "gbk") {
+		try {
+			assertStableGbkBytes(await Bun.file(dst).bytes(), dst);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
 		payload = encodeStrict(content, "gbk");
 	}
 	// Attempt 0 is the plain write. The single retry is reachable only when the

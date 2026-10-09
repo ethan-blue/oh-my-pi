@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added streaming output callbacks to managed process execution without retaining complete stdout.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

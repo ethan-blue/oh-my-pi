@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import { assertStableGbkBytes, encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import { assertProtectedConfigMutation } from "../tools/protected-mode";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -17,7 +18,7 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { uriToFile } from "./utils";
+import { fileToUri, uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -176,8 +177,16 @@ export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promi
  * characters throw before anything lands on disk.
  */
 export async function writeTextWithPolicy(filePath: string, text: string): Promise<void> {
-	const encoding = resolveWriteEncoding(filePath, true);
+	assertProtectedConfigMutation(filePath);
+	const original = await Bun.file(filePath)
+		.bytes()
+		.catch((error: unknown) => {
+			if (!isEnoent(error)) throw error;
+			return undefined;
+		});
+	const encoding = resolveWriteEncoding(filePath, original !== undefined);
 	if (encoding === "gbk") {
+		if (original) assertStableGbkBytes(original, filePath);
 		await Bun.write(filePath, encodeStrict(text, "gbk"));
 		return;
 	}
@@ -213,16 +222,21 @@ export async function applyEditsThenRename(
 	source: string,
 	dest: string,
 ): Promise<void> {
-	const backups: Array<{ filePath: string; original: string }> = [];
+	assertProtectedConfigMutation(source);
+	assertProtectedConfigMutation(dest);
+	await precheckTextOpEncodings(
+		references.map(({ filePath, edits }) => ({ kind: "text", uri: fileToUri(filePath), edits })),
+	);
+	const backups: Array<{ filePath: string; original: Uint8Array }> = [];
 	for (const { filePath, edits } of references) {
-		backups.push({ filePath, original: await readTextFileWithPolicy(filePath) });
+		backups.push({ filePath, original: await Bun.file(filePath).bytes() });
 		await applyTextEdits(filePath, edits);
 	}
 	try {
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => writeTextWithPolicy(filePath, original)));
+		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
 		throw err;
 	}
 }
@@ -357,9 +371,7 @@ export async function applyWorkspaceEdit(
 		// Batch encoding precheck: decode every input and strictly encode
 		// every output BEFORE the first write, so one unrepresentable file
 		// fails the whole batch instead of leaving earlier files modified.
-		await precheckTextOpEncodings(
-			ops.filter((op): op is Extract<(typeof ops)[number], { kind: "text" }> => op.kind === "text"),
-		);
+		await precheckTextOpEncodings(ops);
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
@@ -471,7 +483,7 @@ export async function applyWorkspaceEdit(
 		await precheckTextOpEncodings(
 			Object.entries(changes)
 				.filter(([, textEdits]) => textEdits.length > 0)
-				.map(([uri, textEdits]) => ({ uri, edits: textEdits })),
+				.map(([uri, textEdits]) => ({ kind: "text", uri, edits: textEdits })),
 		);
 		for (const uri in changes) {
 			const textEdits = changes[uri];
@@ -493,19 +505,76 @@ export async function applyWorkspaceEdit(
  * whole batch with zero writes (R06: partial cross-file writes are not
  * acceptable for an error a precheck can predict).
  */
-async function precheckTextOpEncodings(ops: ReadonlyArray<{ uri: string; edits: TextEdit[] }>): Promise<void> {
+async function precheckTextOpEncodings(ops: ReadonlyArray<WorkspaceEditOp>): Promise<void> {
+	type State = { bytes?: Uint8Array; directory: boolean };
+	type Event = { path: string; state?: State } | { from: string; to: string };
+	const events: Event[] = [];
+	const disk = new Map<string, State | undefined>();
+	const contains = (parent: string, child: string) => child === parent || child.startsWith(`${parent}${path.sep}`);
+	const load = async (filePath: string, before = events.length): Promise<State | undefined> => {
+		for (let i = before - 1; i >= 0; i--) {
+			const event = events[i];
+			if ("from" in event) {
+				if (contains(event.to, filePath)) return load(event.from + filePath.slice(event.to.length), i);
+				if (contains(event.from, filePath)) return undefined;
+			} else if (event.path === filePath) return event.state;
+			else if (!event.state && contains(event.path, filePath)) return undefined;
+		}
+		if (disk.has(filePath)) return disk.get(filePath);
+		try {
+			const stat = await fs.stat(filePath);
+			const state: State = {
+				directory: stat.isDirectory(),
+				bytes: stat.isFile() ? await Bun.file(filePath).bytes() : undefined,
+			};
+			disk.set(filePath, state);
+			return state;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			disk.set(filePath, undefined);
+			return undefined;
+		}
+	};
 	for (const op of ops) {
+		if (op.kind === "rename") {
+			const from = uriToFile(op.oldUri),
+				to = uriToFile(op.newUri);
+			assertProtectedConfigMutation(from);
+			assertProtectedConfigMutation(to);
+			if (from === to) continue;
+			if (await load(to)) {
+				if (!op.options?.overwrite && op.options?.ignoreIfExists) continue;
+				if (!op.options?.overwrite) throw new ToolError(`LSP rename target exists: ${to}`);
+			}
+			events.push({ from, to });
+			continue;
+		}
 		const filePath = uriToFile(op.uri);
-		if (resolveWriteEncoding(filePath, true) !== "gbk") continue;
-		const bytes = await Bun.file(filePath)
-			.bytes()
-			.catch(() => {
-				throw new ToolError(`LSP workspace edit targets unreadable file: ${filePath}`);
-			});
+		assertProtectedConfigMutation(filePath);
+		if (op.kind === "delete") {
+			events.push({ path: filePath });
+			continue;
+		}
+		const state = await load(filePath);
+		if (op.kind === "create") {
+			if (state && !op.options?.overwrite) {
+				if (op.options?.ignoreIfExists) continue;
+				throw new ToolError(`LSP create target exists: ${filePath}`);
+			}
+			events.push({ path: filePath, state: { bytes: new Uint8Array(), directory: false } });
+			continue;
+		}
+		const bytes = state?.bytes;
+		if (!bytes) throw new ToolError(`LSP workspace edit targets unreadable file: ${filePath}`);
 		const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
 		const result = applyTextEditsToString(content, op.edits);
 		try {
-			encodeStrict(result, "gbk");
+			const gbk = resolveWriteEncoding(filePath, true) === "gbk";
+			if (gbk) assertStableGbkBytes(bytes, filePath);
+			events.push({
+				path: filePath,
+				state: { directory: false, bytes: gbk ? encodeStrict(result, "gbk") : new TextEncoder().encode(result) },
+			});
 		} catch (error) {
 			throw new ToolError(
 				`${formatPathRelativeToCwd(filePath, process.cwd())}: workspace edit rejected before any write — ${error instanceof Error ? error.message : String(error)}`,

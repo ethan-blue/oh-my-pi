@@ -10,6 +10,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { astEdit, astGrep, grep } from "@oh-my-pi/pi-natives";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AstEditTool } from "@oh-my-pi/pi-coding-agent/tools/ast-edit";
+import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const POLICY = JSON.stringify({
@@ -68,6 +71,30 @@ describe("GBK search and AST", () => {
 
 	afterEach(async () => {
 		await removeWithRetries(tmpDir);
+	});
+
+	it("the single-path AST tool preview and apply both retain GBK Chinese bytes", async () => {
+		const file = path.join(tmpDir, "src", "single.ts");
+		await Bun.write(file, gbk("const 值 = 1;\n"));
+		const queue = new ToolChoiceQueue();
+		const session: ToolSession = {
+			cwd: tmpDir,
+			hasUI: true,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getToolChoiceQueue: () => queue,
+			buildToolChoice: () => ({ type: "tool", name: "resolve" }),
+			steer: () => {},
+		};
+		await new AstEditTool(session).execute("preview", {
+			paths: [file],
+			ops: [{ pat: "const $X = $Y", out: "const $X = 2;" }],
+		});
+		const invoke = queue.peekPendingInvoker();
+		if (!invoke) throw new Error("AST preview did not offer an edit");
+		await invoke({ action: "apply", reason: "GBK regression" });
+		expect(await Bun.file(file).bytes()).toEqual(gbk("const 值 = 2;\n"));
 	});
 
 	it("grep matches a Chinese keyword in a GBK file and renders the line (E20)", async () => {

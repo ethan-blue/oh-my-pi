@@ -21,6 +21,19 @@ function stderrFixture(size: number, exitCode = 0, stdout = ""): string[] {
 }
 
 describe("ptree stderr capture", () => {
+	it("streams large output without retaining stdout and still reports nonzero exits", async () => {
+		let length = 0;
+		const result = await exec(stderrFixture(LARGE_STDERR_SIZE, 3, "stdout-probe"), {
+			onOutput: chunk => {
+				length += chunk.length;
+			},
+			allowNonZero: true,
+		});
+		expect(length).toBe(LARGE_STDERR_SIZE + "stdout-probe".length);
+		expect(result.stdout).toBe("");
+		expect(result.stderr.length).toBe(STDERR_LIMIT);
+		expect(result.exitCode).toBe(3);
+	});
 	it("requires full stderr capture to be selected before spawning", async () => {
 		using child = spawn(stderrFixture(LARGE_STDERR_SIZE));
 		await child.exited;
