@@ -282,6 +282,32 @@ P16 发布（全流程通过）：
 未验证：上游构建的 A/B 性能对照（列为后续项）；真实 LSP 服务器/模型/E630。
 ```
 
+### v18.8.7-gbk.1 发布（2026-10-09 晚）— 通过
+
+```text
+背景：R01—R10 修复后同步上游 v18.8.7（merge a52d683223，冲突已解：上游统一
+LSP 磁盘读取函数接入 GBK 解码；上游删除的子进程旧入口移除），经 Codex 会话
+构建+测试，本会话接手完成发布。
+门禁（Codex 会话记录）：Rust 3011 pass / 4 skip（两项 Windows 平台假设已
+  显式 cfg 门控）；TS GBK 相关 199 pass / 23 平台 skip / 0 fail；真实
+  旧→新→旧 安装升级回退通过。
+本会话核验：
+  - staging zip 8 条目白名单 + 包内逐文件 SHA256SUMS（新增防错装机制）；
+    外层 3 资产哈希与 SHA256SUMS.txt 逐字节一致
+  - 独立解压运行：ompg/18.8.7-gbk.1、--smoke-test ok、
+    build-info SHA=b68f4c9ce864762b509a4b924d39df65cd71f17a（=tag）
+  - 隔离目录安装（校验和验证生效）→ ompg.cmd --version → 重复安装幂等 →
+    -Uninstall 归属验证（1 标记）→ 原版 omp/18.2.11 全程未动
+发布：
+  tag v18.8.7-gbk.1 → b68f4c9ce8（构建 commit，无冲突）；draft 上传
+  （首次 GraphQL 超时重试成功）；GitHub 下载核验（zip d7a8968d…686b3d8b、
+  VALIDATION 23cd2322…243204 一致；解压运行+冒烟+SHA 核对）；公开 prerelease。
+  终态：isDraft=false / isPrerelease=true / publishedAt 2026-10-09T14:19:47Z；
+  3 资产（zip 110,168,199 B / SHA256SUMS 263 B / VALIDATION 2,639 B）。
+  旧 tag v18.8.4-gbk.1 未动。
+Release URL：https://github.com/ethan-blue/oh-my-pi/releases/tag/v18.8.7-gbk.1
+```
+
 ### 补充验收（2026-10-09，发布后资产更新）— 通过
 
 ```text
