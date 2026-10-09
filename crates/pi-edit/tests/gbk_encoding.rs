@@ -355,7 +355,7 @@ async fn stale_edit_protection_works_for_gbk() {
 	// External editor rewrites the file (still GBK).
 	write_gbk(&ws, "src/stale.c", "int a = 100;\nint b = 2;\n");
 	let writer = EncodingWriter::default();
-	let _outcome = apply(
+	let outcome = apply(
 		&ws,
 		&serde_json::json!({ "input": format!("[src/stale.c#{tag}]\nPUT 1.=1:\n+int a = 9;") }),
 		&writer,
