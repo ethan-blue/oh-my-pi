@@ -243,6 +243,29 @@ P16 发布（全流程通过）：
 未做：integration 分支的完整构建/发布（按 08 规范留待正式升级批次）
 ```
 
+### 补充验收（2026-10-09，发布后资产更新）— 通过
+
+```text
+触发：完成度核查提出 4 项缺口（峰值内存/原始样本、E21 确定性、E16 注入、旧数据副本）。
+E21：gbk-lsp-recovery.test.ts（新增）——applyWorkspaceEdit rename 式（text edit+rename）
+     与 code-action 式（多文件、UTF-16 位置含中文→中文替换）后磁盘 GBK 字节与手写期望
+     逐字节相等；不需要 LSP 服务器（该函数即 lsp 工具驱动的确定性面）。
+E16：同文件——目标父路径被普通文件占据注入 ENOTDIR 写失败；move 报 isError、源文件
+     GBK 字节逐字节不变、blocker 不动。
+bench：gbk-encoding-bench.ts 增加 process.memoryUsage().rss 采样（峰值）与原始样本输出；
+     重跑（同机）：read p50 1.53/1.54/1.36 ms、edit p50 1.33/1.44/1.37、grep p50
+     8.63/8.38/5.57；峰值 RSS 233.1/214.7/212.6 MiB；原始样本（3×3×40）存档
+     scripts/release-assets/bench-samples-v18.8.4-gbk.1.json 并随 Release 发布。
+旧数据副本：~/.omp/agent/config.yml（18.2.11）经 grep 确认无密钥后复制到隔离副本根；
+     PI_CONFIG_DIR 指向副本 → ompg config list 正确解析（原版主题等设置显示）。
+     会话 *.jsonl 副本 → listSessionsReadOnly 列出 21 个（状态推导正确）、
+     loadSessionMessagesReadOnly 解析消息成功。全程只读副本，未迁移、未上传。
+Release 资产更新：VALIDATION.md（E16/E21/性能/兼容新证据）+ SHA256SUMS.txt --clobber
+     重传，新增 bench-samples 资产；zip 未动（哈希不变 d937980f…）；重新下载核验
+     3 资产哈希与 SHA256SUMS 逐字节一致；终态 isDraft=false/isPrerelease=true、4 资产。
+源码提交：0f29e0e998（feat/gbk-text-io，已推送）；tag 不变（exe 未变）。
+```
+
 
 ## 3. 每阶段记录模板
 
@@ -291,9 +314,10 @@ Tag 解引用完整 SHA：5c3b67efbba58ddf8568ca7f7cba1d1ca32e3ea6
 Bun / Rust / linker / native ABI：Bun 1.4.2 / nightly-2026-10-06 / MSVC 14.44 / win32-x64-modern（release profile）
 资产清单：
   ompg-18.8.4-gbk.1-windows-x64.zip  116,284,801 B  SHA-256 d937980ff9d11490f168078d3d0d50f7b216256b219d2ad7594efefe0b8aac38
-  SHA256SUMS.txt                      263 B
-  VALIDATION.md                       6,299 B         SHA-256 81c52b028c00c7cba29e02a400d4d9887b82e4e83dc2f4549d0ce11d930b0b0c
-下载核验目录与命令：/tmp/ompg-verify；gh release download v18.8.4-gbk.1 --repo ethan-blue/oh-my-pi；sha256sum
+  SHA256SUMS.txt                      279 B
+  VALIDATION.md                       7,508 B         SHA-256 af26759625afb344ed5566bdd615786cd16a3bcfdc0dc230cbc88f0dfe152ed1
+  bench-samples-v18.8.4-gbk.1.json    7,562 B         SHA-256 3ecc452d0ea6495bb54cd63ab7301fb308d2b8648c418b0b5be580fd5257a465
+下载核验目录与命令：/tmp/ompg-verify{,2}；gh release download v18.8.4-gbk.1 --repo ethan-blue/oh-my-pi；sha256sum
 成品 GBK 测试结果：--version=ompg/18.8.4-gbk.1、--smoke-test ok、build-info SHA=tag SHA、
   addon 嵌入且暂存至 fork 缓存根（源码级 GBK 字节证据见 VALIDATION.md E 矩阵）
 原版共存结果：omp/18.2.11 安装与数据全程未动（P15 安装/卸载/共启演练）
