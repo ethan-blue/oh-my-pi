@@ -41,17 +41,61 @@ function Remove-PathEntry {
 }
 
 if ($Uninstall) {
-    Write-Step "Removing ompg from $Root"
-    if (Test-Path -LiteralPath $Root) {
-        # A running ompg.exe cannot be deleted; report and let the user retry.
-        try {
-            Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction Stop
-        } catch {
-            throw "Could not remove $Root (is ompg still running?). Close ompg windows and re-run. Original `omp` and ~\.ompg data were not touched."
+    # Ownership validation BEFORE anything is deleted: the root must look
+    # like an ompg install (a versions\<ver>\install.json marker naming this
+    # fork), must not be a dangerous location, and only files this installer
+    # created are removed — never a blind recursive delete of the root.
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
+    $dangerous = @(
+        $env:USERPROFILE,
+        $env:LOCALAPPDATA,
+        $env:TEMP,
+        $env:SystemRoot,
+        $env:ProgramFiles
+    ) | Where-Object { $_ }
+    foreach ($danger in $dangerous) {
+        if ($normalizedRoot -ieq [System.IO.Path]::GetFullPath($danger)) {
+            throw "Refusing to uninstall from $Root: it is a system/user root, not an ompg install directory."
         }
     }
+    if ($normalizedRoot -ieq [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "omp"))) {
+        throw "Refusing to uninstall: $Root is the ORIGINAL omp install directory; ompg never touches it."
+    }
+    $markers = @()
+    if (Test-Path -LiteralPath (Join-Path $Root "versions"))) {
+        $markers = Get-ChildItem -LiteralPath (Join-Path $Root "versions") -Filter "install.json" -Recurse -ErrorAction SilentlyContinue
+    }
+    $owned = @($markers | Where-Object {
+        try {
+            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).repository -eq $Repo
+        } catch { $false }
+    })
+    if ($owned.Count -eq 0) {
+        throw "Refusing to uninstall $Root: no ompg install marker found (versions\<version>\install.json naming $Repo). Not an ompg-managed directory; nothing was deleted."
+    }
+    Write-Step "Uninstall verified: $($owned.Count) ompg install marker(s) in $Root"
+
+    $removed = @()
+    foreach ($entry in @("ompg.cmd", "ompg.exe")) {
+        $target = Join-Path $Root $entry
+        if (Test-Path -LiteralPath $Target) {
+            Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+            $removed += $entry
+        }
+    }
+    try {
+            Remove-Item -LiteralPath (Join-Path $Root "versions") -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Step "Could not fully remove versions\ (is ompg still running?); re-run the uninstaller after closing ompg."
+        }
+    # Report anything else the installer never created instead of deleting it.
+    $known = @("ompg.cmd", "ompg.exe", "versions")
+    $leftovers = @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Name })
+    if ($Leftovers.Count -gt 0) {
+            Write-Step "Kept $($Leftovers.Count) file(s) this installer did not create: $($Leftovers.Name -join ', ')"
+        }
     Remove-PathEntry -Entry $Root
-    Write-Step "Uninstalled. User data (~\.ompg) and the original omp installation were left untouched; delete ~\.ompg manually to remove sessions and caches."
+    Write-Step "Uninstalled (removed: $($removed -join ', ')). User data (~\.ompg) and the original omp installation were left untouched; delete ~\.ompg manually to remove sessions and caches."
     exit 0
 }
 
@@ -79,7 +123,18 @@ if ($Download) {
     if ($actual -ine $expected) { throw "Checksum mismatch for ${archiveName}: expected $expected, got $actual." }
     Write-Step "Checksum verified"
     Expand-Archive -Path (Join-Path $work $archiveName) -DestinationPath $work -Force
-    $PSScriptRootForFiles = $work
+    # Release archives carry a top-level version directory
+    # (ompg-<version>-windows-x64\ompg.exe); fall back to a flat layout so
+    # both shapes install. Point the file source at whichever holds ompg.exe.
+    if (Test-Path -LiteralPath (Join-Path $work "ompg.exe")) {
+        $PSScriptRootForFiles = $work
+    } else {
+        $nested = Get-ChildItem -LiteralPath $work -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "ompg.exe") } |
+            Select-Object -First 1
+        if ($nested) { $PSScriptRootForFiles = $nested.FullName }
+        else { throw "Extracted archive has no ompg.exe under $work." }
+    }
 } else {
     # Install from the files sitting next to this script (the release archive layout).
     $PSScriptRootForFiles = $PSScriptRoot

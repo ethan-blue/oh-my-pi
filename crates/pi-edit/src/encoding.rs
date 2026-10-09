@@ -226,6 +226,9 @@ pub struct CompiledEncodingPolicy {
 	overrides:         Vec<(GlobMatcher, TextEncoding)>,
 	default_encoding:  Option<TextEncoding>,
 	new_file_encoding: Option<TextEncoding>,
+	/// `false` when the spec said `enabled: false`: `resolve` always answers
+	/// `None` so every consumer keeps upstream UTF-8 behavior.
+	enabled:           bool,
 }
 
 impl CompiledEncodingPolicy {
@@ -236,6 +239,19 @@ impl CompiledEncodingPolicy {
 				"unsupported schemaVersion {} (supported: 1)",
 				spec.schema_version
 			)));
+		}
+		// `enabled: false` disables the policy outright: resolve() always
+		// answers `None` (upstream UTF-8 behavior), and the field requirements
+		// below don't apply — a disabled stub may legitimately omit them.
+		if !spec.enabled {
+			return Ok(Self {
+				root,
+				include: Vec::new(),
+				overrides: Vec::new(),
+				default_encoding: None,
+				new_file_encoding: None,
+				enabled: false,
+			});
 		}
 		let include = spec
 			.include
@@ -266,7 +282,7 @@ impl CompiledEncodingPolicy {
 		if new_file_encoding.is_none() {
 			return Err(PolicyError("newFileEncoding is required".into()));
 		}
-		Ok(Self { root, include, overrides, default_encoding, new_file_encoding })
+		Ok(Self { root, include, overrides, default_encoding, new_file_encoding, enabled: true })
 	}
 
 	/// Project root the globs are relative to.
@@ -282,6 +298,9 @@ impl CompiledEncodingPolicy {
 	/// else `newFileEncoding`; existing files are managed only when an include
 	/// glob matches, then take the first matching override, else the default.
 	pub fn resolve(&self, path: &Path, exists: bool) -> Option<TextEncoding> {
+		if !self.enabled {
+			return None;
+		}
 		// Walkers on Windows hand out verbatim (`\\?\C:\x`) forms of the same
 		// path; normalize both sides before matching so an ordinary-form root
 		// still governs them.

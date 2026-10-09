@@ -38,7 +38,7 @@ function createSession(cwd: string): ToolSession {
 const LINE = "// 这是一个用于基准测试的行 padding padding padding padding padding\n";
 const LINE_COUNT = 800;
 
-function gbkLineBytes(): Uint8Array {
+function gbkLineBytes(line: string = LINE): Uint8Array {
 	const map: Record<string, number[]> = {
 		这: [0xd5, 0xe2],
 		是: [0xca, 0xc7],
@@ -54,7 +54,7 @@ function gbkLineBytes(): Uint8Array {
 		行: [0xd0, 0xd0],
 	};
 	const out: number[] = [];
-	for (const ch of LINE) {
+	for (const ch of line) {
 		if (ch.codePointAt(0)! < 0x80) out.push(ch.charCodeAt(0));
 		else {
 			const seq = map[ch];
@@ -63,6 +63,33 @@ function gbkLineBytes(): Uint8Array {
 		}
 	}
 	return Uint8Array.from(out);
+}
+
+/** Whole-file GBK bytes with a unique ASCII marker on line 3. */
+function gbkBodyWithMarker(marker: string): Uint8Array {
+	const markerLine = `// ${marker}\n`;
+	const parts: Uint8Array[] = [];
+	for (let index = 0; index < LINE_COUNT; index++) {
+		parts.push(index === 2 ? gbkLineBytes(markerLine) : gbkLineBytes());
+	}
+	let total = 0;
+	for (const part of parts) total += part.byteLength;
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.byteLength;
+	}
+	return out;
+}
+
+/** UTF-8 body with a unique ASCII marker on line 3. */
+function utf8BodyWithMarker(marker: string): string {
+	const lines: string[] = [];
+	for (let index = 0; index < LINE_COUNT; index++) {
+		lines.push(index === 2 ? `// ${marker}\n` : LINE);
+	}
+	return lines.join("");
 }
 
 const POLICY_PRESENT_UNMATCHED = JSON.stringify({
@@ -112,14 +139,14 @@ async function runMode(mode: Mode) {
 		await fs.writeFile(path.join(root, ".omp", "encoding.json"), mode.policy, "utf8");
 	}
 	const mainFile = path.join(root, "src", "bench.txt");
-	const body = LINE.repeat(LINE_COUNT);
+	// Line 3 carries a unique marker so every edit iteration replaces exactly
+	// one line (the shared padding substring made replaces ambiguous, and the
+	// previous bench silently timed FAILED edits).
+	const initialMarker = "MARKER_0_PADDINGPADDINGPADDING";
 	if (mode.writeGbk) {
-		const oneLine = gbkLineBytes();
-		const chunk = Buffer.from(oneLine);
-		const parts = Array.from({ length: LINE_COUNT }, () => chunk);
-		await Bun.write(mainFile, Buffer.concat(parts));
+		await Bun.write(mainFile, Buffer.from(gbkBodyWithMarker(initialMarker)));
 	} else {
-		await Bun.write(mainFile, body);
+		await Bun.write(mainFile, utf8BodyWithMarker(initialMarker));
 	}
 	for (let i = 0; i < 50; i++) {
 		const file = path.join(root, "grepdir", `f${i}.txt`);
@@ -145,25 +172,53 @@ async function runMode(mode: Mode) {
 		peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
 	};
 
+	let prevMarker = initialMarker;
 	for (let i = 0; i < WARMUP + ITERATIONS; i++) {
 		// read: whole file (snapshot path)
 		let start = performance.now();
-		await read.execute(`r-${i}`, { path: mainFile });
-		if (i >= WARMUP) readSamples.push(performance.now() - start);
+		const readResult = await read.execute(`r-${i}`, { path: mainFile });
+		if (i >= WARMUP) {
+			if (readResult.isError) {
+				throw new Error(`read iteration ${i} failed`);
+			}
+			readSamples.push(performance.now() - start);
+		}
 		sampleRss();
 
-		// edit: flip a marker line back and forth (real write each time)
-		const from = i % 2 === 0 ? "padding padding padding padding" : "padding padding padding padding padding";
-		const to = i % 2 === 0 ? "padding padding padding padding padding" : "padding padding padding padding";
+		// edit: rewrite the unique marker line (real, unambiguous write each
+		// time; a failed edit's latency must never be recorded).
+		const nextMarker = `MARKER_${i + 1}_PADDINGPADDINGPADDING`;
 		start = performance.now();
-		await edit.execute(`e-${i}`, { path: mainFile, old_string: from, new_string: to });
-		if (i >= WARMUP) editSamples.push(performance.now() - start);
+		const editResult = await edit.execute(`e-${i}`, {
+			path: mainFile,
+			old_string: prevMarker,
+			new_string: nextMarker,
+		});
+		if (i >= WARMUP) {
+			if (editResult.isError) {
+				throw new Error(`edit iteration ${i} failed: ${JSON.stringify(editResult.content)}`);
+			}
+			editSamples.push(performance.now() - start);
+		}
+		prevMarker = nextMarker;
 		sampleRss();
 
-		// grep: keyword over 50 files
+		// grep: the SAME ASCII pattern and the same 50-file fixture in every
+		// mode; GBK/unmatched modes pass the encoding policy explicitly so
+		// the comparison measures equivalent work.
 		start = performance.now();
-		await grep({ pattern: mode.writeGbk ? "基准" : "padding", path: path.join(root, "grepdir"), maxColumns: 200 });
-		if (i >= WARMUP) grepSamples.push(performance.now() - start);
+		const grepResult = await grep({
+			pattern: "padding",
+			path: path.join(root, "grepdir"),
+			maxColumns: 200,
+			...(mode.policy ? { encodingPolicy: { root, json: mode.policy } } : {}),
+		});
+		if (i >= WARMUP) {
+			if (grepResult.totalMatches <= 0) {
+				throw new Error(`grep iteration ${i} matched nothing (mode ${mode.name})`);
+			}
+			grepSamples.push(performance.now() - start);
+		}
 		sampleRss();
 	}
 	sampleRss();

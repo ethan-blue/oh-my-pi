@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -464,4 +464,79 @@ fn policy_resolves_verbatim_prefixed_paths() {
 	// And the verbatim form of an unrelated root stays unmanaged.
 	let other = std::path::PathBuf::from(r"\\?\D:\elsewhere\a.c");
 	assert_eq!(ordinary_root.resolve(&other, true), None);
+}
+
+/// R01: `enabled: false` disables the policy everywhere — a UTF-8 file inside
+/// the include globs must stay UTF-8 behavior, and edits must not go through
+/// GBK validation.
+#[tokio::test]
+async fn disabled_policy_keeps_upstream_utf8_behavior() {
+	let mut ws = common::Workspace::new(EditMode::Replace);
+	let spec: EncodingSpec = serde_json::from_str(
+		r#"{
+			"schemaVersion": 1,
+			"enabled": false,
+			"include": ["src/**"],
+			"defaultEncoding": "gbk",
+			"newFileEncoding": "gbk"
+		}"#,
+	)
+	.expect("disabled spec may omit nothing but stays valid");
+	ws.config.policy.encoding = Some(Arc::new(
+		CompiledEncodingPolicy::compile(ws.cwd().to_path_buf(), &spec).expect("compiles"),
+	));
+	// UTF-8 Chinese bytes in src/ — with the policy disabled this must read
+	// as plain UTF-8 and persist as UTF-8.
+	let utf8_text = "// 中文\nint x = 1;\n";
+	ws.write("src/a.c", utf8_text);
+	let writer = EncodingWriter::default();
+	apply(
+		&ws,
+		&serde_json::json!({ "path": "src/a.c", "old_string": "int x = 1;", "new_string": "int x = 2;" }),
+		&writer,
+	)
+	.await
+	.expect("edit applies as UTF-8");
+	let after = std::fs::read(ws.cwd().join("src/a.c")).unwrap();
+	assert_eq!(after, "// 中文\nint x = 2;\n".as_bytes());
+	assert_eq!(writer.requests.lock()[0].encoding, None);
+}
+
+/// R01: a disabled stub without the required encoding fields still compiles.
+#[test]
+fn disabled_policy_compiles_without_required_fields() {
+	let spec: EncodingSpec =
+		serde_json::from_str(r#"{ "schemaVersion": 1, "enabled": false }"#).expect("parses");
+	let policy = CompiledEncodingPolicy::compile(Path::new("/proj").to_path_buf(), &spec)
+		.expect("disabled stub compiles without encodings");
+	assert_eq!(policy.resolve(Path::new("/proj/src/a.c"), true), None);
+	assert_eq!(policy.resolve(Path::new("/proj/src/a.c"), false), None);
+}
+
+/// R04: GBK files whose bytes a re-encode would not reproduce (the euro sign
+/// is `A2 E3` on disk but re-encodes as the single byte `80`) refuse edits so
+/// unedited bytes never change silently.
+#[tokio::test]
+async fn byte_unstable_gbk_file_refuses_edits() {
+	let ws = gbk_workspace(EditMode::Replace);
+	let path = ws.cwd().join("src/euro.c");
+	std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+	// "// 价 " with the euro as A2 E3, then an editable ASCII line.
+	let original: &[u8] = &[
+		0x2f, 0x2f, 0x20, 0xbc, 0xdb, 0xa2, 0xe3, 0x0a, 0x69, 0x6e, 0x74, 0x20, 0x78, 0x20, 0x3d,
+		0x20, 0x31, 0x3b, 0x0a,
+	];
+	std::fs::write(&path, original).unwrap();
+	let writer = EncodingWriter::default();
+	let err = apply(
+		&ws,
+		&serde_json::json!({ "path": "src/euro.c", "old_string": "int x = 1;", "new_string": "int x = 2;" }),
+		&writer,
+	)
+	.await
+	.expect_err("byte-unstable files must refuse edits");
+	let message = err.to_string();
+	assert!(message.contains("original bytes"), "{message}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(std::fs::read(&path).unwrap(), original);
 }

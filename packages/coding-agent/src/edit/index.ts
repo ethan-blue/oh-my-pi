@@ -25,7 +25,7 @@ import {
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
-import { discoverEncodingPolicy, encodeStrict, resolveWriteEncoding } from "../encoding/index";
+import { discoverEncodingPolicy, encodeStrict } from "../encoding/index";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
@@ -673,14 +673,11 @@ export class EditTool implements AgentTool<TInput> {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
-			// The destination persists with the source's encoding (the engine
-			// resolved it before staging the move).
-			await writeFileWithFallback(
-				request.moveTo,
-				request.content,
-				undefined,
-				resolveWriteEncoding(request.moveTo, false),
-			);
+			// A move keeps the SOURCE's encoding — `request.encoding` carries
+			// what the engine resolved before staging. Resolving the
+			// destination by its own new-file rule would silently transcode
+			// (e.g. GBK source into a newFileEncoding=utf8 destination).
+			await writeFileWithFallback(request.moveTo, request.content, undefined, gbk ? "gbk" : undefined);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(

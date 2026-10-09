@@ -40,6 +40,7 @@ import { canSpawnAtDepth } from "../task/types";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
+import { protectedEvalDenial } from "./protected-mode";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
@@ -533,6 +534,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
+		// R10 protected mode: eval backends execute arbitrary code with full
+		// file access; in a protected project they are refused before any
+		// backend is even discovered.
+		const evalDenial = protectedEvalDenial(session.cwd);
+		if (evalDenial !== undefined) {
+			throw new ToolError(evalDenial);
+		}
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;

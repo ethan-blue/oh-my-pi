@@ -20,6 +20,7 @@ import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { protectedCommandDenial } from "./protected-mode";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -1019,6 +1020,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		// R10 protected mode: refuse BEFORE any process is spawned when the
+		// project opted in and the command is not a configured build task.
+		if (virtualCwd === undefined) {
+			const denial = protectedCommandDenial(commandCwd, command);
+			if (denial !== undefined) {
+				throw new ToolError(denial);
+			}
+		}
 		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
 				throw new ToolError(

@@ -234,3 +234,117 @@ describe("GBK project encoding policy", () => {
 		expect(text).toBe("// 中文\nint x = 1;\nint y = 2;\n");
 	});
 });
+
+describe("review regressions R01-R03", () => {
+	let tmpDir: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gbk-review-reg-"));
+		await fs.mkdir(path.join(tmpDir, "src"), { recursive: true });
+		await fs.mkdir(path.join(tmpDir, ".omp"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	it("R01: enabled=false keeps plain UTF-8 behavior inside the include globs", async () => {
+		await fs.writeFile(
+			path.join(tmpDir, ".omp", "encoding.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: false,
+				include: ["src/**"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "gbk",
+			}),
+			"utf8",
+		);
+		const file = path.join(tmpDir, "src", "a.c");
+		await fs.writeFile(file, "// 中文\nint x = 1;\n", "utf8");
+		const session = createSession(tmpDir);
+		const read = await new ReadTool(session).execute("read-1", { path: file });
+		// Must show the REAL UTF-8 text, not GBK-misread mojibake.
+		expect(resultText(read)).toContain("// 中文");
+		expect(resultText(read)).not.toContain("\u{6D93}");
+
+		const edit = new EditTool(session, "replace");
+		await edit.execute("edit-1", {
+			path: file,
+			old_string: "int x = 1;",
+			new_string: "int x = 2;",
+		});
+		const onDisk = Buffer.from(await fs.readFile(file));
+		expect(onDisk.toString("utf8")).toBe("// 中文\nint x = 2;\n");
+	});
+
+	it("R02: a new file honors newFileEncoding=utf8 while defaultEncoding=gbk", async () => {
+		await fs.writeFile(
+			path.join(tmpDir, ".omp", "encoding.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				include: ["src/**"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "utf8",
+				overrides: [],
+			}),
+			"utf8",
+		);
+		const session = createSession(tmpDir);
+		const tool = new WriteTool(session);
+		const result = await tool.execute("write-1", {
+			path: path.join(tmpDir, "src", "new.c"),
+			content: "// 中文\n",
+		});
+		expect(result.isError).toBeFalsy();
+		// UTF-8 bytes for 中文: e4 b8 ad e6 96 87 — NOT GBK d6 d0 ce c4.
+		const onDisk = Buffer.from(await fs.readFile(path.join(tmpDir, "src", "new.c")));
+		expect([...onDisk]).toEqual([0x2f, 0x2f, 0x20, 0xe4, 0xb8, 0xad, 0xe6, 0x96, 0x87, 0x0a]);
+	});
+
+	it("R03: a move keeps the source GBK encoding even when newFileEncoding=utf8", async () => {
+		await fs.writeFile(
+			path.join(tmpDir, ".omp", "encoding.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				include: ["src/**"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "utf8",
+				overrides: [],
+			}),
+			"utf8",
+		);
+		const session = createSession(tmpDir);
+		// The source file is seeded directly with GBK bytes (include-matched,
+		// so the default rule governs it as GBK).
+		const source = path.join(tmpDir, "src", "a.c");
+		await fs.writeFile(
+			source,
+			hex([
+				0x2f, 0x2f, 0x20, 0xd6, 0xd0, 0xce, 0xc4, 0x0a, 0x69, 0x6e, 0x74, 0x20, 0x78, 0x20, 0x3d, 0x20, 0x31, 0x3b,
+				0x0a,
+			]),
+		);
+		const edit = new EditTool(session, "patch");
+		const outcome = await edit.execute("move-1", {
+			path: source,
+			edits: [{ op: "update", rename: "src/b.c", diff: "@@\n-int x = 1;\n+int x = 2;\n" }],
+		});
+		expect(outcome.isError).toBeFalsy();
+		const dest = path.join(tmpDir, "src", "b.c");
+		const onDisk = Buffer.from(await fs.readFile(dest));
+		// GBK 中文 (d6 d0 ce c4) preserved; the edit applied; nothing became UTF-8.
+		expect([...onDisk]).toEqual([
+			0x2f, 0x2f, 0x20, 0xd6, 0xd0, 0xce, 0xc4, 0x0a, 0x69, 0x6e, 0x74, 0x20, 0x78, 0x20, 0x3d, 0x20, 0x32, 0x3b,
+			0x0a,
+		]);
+		expect(
+			await fs.stat(source).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+	});
+});

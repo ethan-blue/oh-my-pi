@@ -2,7 +2,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
-import { decodeStrict, resolveFileEncoding } from "../encoding/index";
+import { decodeStrict, discoverEncodingPolicy, resolveFileEncoding } from "../encoding/index";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -1771,6 +1771,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * images, documents, notebooks, and streamed/paged text. `located` carries
 	 * the URL a routed read resolved to `readPath`; its hints name that URL.
 	 */
+	/**
+	 * R10 recovery guidance for an uncovered, undecodable file: when a project
+	 * encoding policy exists but its rules miss this path, the error must point
+	 * at the rule gap (add an include/override, then re-read) instead of
+	 * leaving the model to invent an out-of-band rewrite. Returns an empty
+	 * string when no policy exists anywhere (nothing to point at).
+	 */
+	encodingPolicyGapHint(absolutePath: string): string {
+		let discovered;
+		try {
+			discovered = discoverEncodingPolicy(this.session.cwd);
+		} catch {
+			return "";
+		}
+		if (!discovered) return "";
+		const relative = path.relative(discovered.root, absolutePath).split(path.sep).join("/");
+		return `The project encoding policy at ${discovered.root}/.omp/encoding.json does not cover this path. If the file is GBK, add an include rule covering '${relative}' (or an override), then re-read it with the read tool. Do not rewrite the file through shell or scripting languages.`;
+	}
+
 	async #readFilesystemPath(
 		readPath: string,
 		options: {
@@ -2155,10 +2174,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				return readBinary(this.session, { absolutePath, view: "" }, parsed, signal);
 			}
 			if (looksBinary) {
+				// Diagnostic for the R10 recovery loop: when a project encoding
+				// policy exists but this path isn't covered, the model needs a
+				// rule pointer (never a suggestion to shell out and rewrite).
+				const policyHint = this.encodingPolicyGapHint(absolutePath);
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(
 						prependSuffixResolutionNotice(
-							`[Cannot read binary file '${resolvedDisplayPath}' (${formatBytes(fileSize)}); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]`,
+							`[Cannot read '${resolvedDisplayPath}' (${formatBytes(fileSize)}); not valid UTF-8 text.${policyHint ? ` ${policyHint}` : " Use ':raw' to read bytes verbatim."}]`,
 							suffixResolution,
 						),
 					)

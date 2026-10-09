@@ -1,8 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
-import { encodeStrict } from "../encoding/index";
+import { encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -355,6 +354,12 @@ export async function applyWorkspaceEdit(
 		for (const op of ops) {
 			if (op.kind === "text") sortAndValidateTextEdits(op.edits);
 		}
+		// Batch encoding precheck: decode every input and strictly encode
+		// every output BEFORE the first write, so one unrepresentable file
+		// fails the whole batch instead of leaving earlier files modified.
+		await precheckTextOpEncodings(
+			ops.filter((op): op is Extract<(typeof ops)[number], { kind: "text" }> => op.kind === "text"),
+		);
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
@@ -463,6 +468,11 @@ export async function applyWorkspaceEdit(
 		for (const uri in changes) {
 			sortAndValidateTextEdits(changes[uri]);
 		}
+		await precheckTextOpEncodings(
+			Object.entries(changes)
+				.filter(([, textEdits]) => textEdits.length > 0)
+				.map(([uri, textEdits]) => ({ uri, edits: textEdits })),
+		);
 		for (const uri in changes) {
 			const textEdits = changes[uri];
 			if (textEdits.length === 0) continue;
@@ -474,4 +484,32 @@ export async function applyWorkspaceEdit(
 	}
 
 	return { applied, executed };
+}
+
+/**
+ * Batch encoding precheck for a workspace edit's text operations: compute
+ * every file's resulting text and strictly encode it under that file's policy
+ * charset BEFORE any write happens. A single unrepresentable file fails the
+ * whole batch with zero writes (R06: partial cross-file writes are not
+ * acceptable for an error a precheck can predict).
+ */
+async function precheckTextOpEncodings(ops: ReadonlyArray<{ uri: string; edits: TextEdit[] }>): Promise<void> {
+	for (const op of ops) {
+		const filePath = uriToFile(op.uri);
+		if (resolveWriteEncoding(filePath, true) !== "gbk") continue;
+		const bytes = await Bun.file(filePath)
+			.bytes()
+			.catch(() => {
+				throw new ToolError(`LSP workspace edit targets unreadable file: ${filePath}`);
+			});
+		const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
+		const result = applyTextEditsToString(content, op.edits);
+		try {
+			encodeStrict(result, "gbk");
+		} catch (error) {
+			throw new ToolError(
+				`${formatPathRelativeToCwd(filePath, process.cwd())}: workspace edit rejected before any write — ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 }

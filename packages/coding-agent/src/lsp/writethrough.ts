@@ -134,7 +134,12 @@ export async function writethroughNoop(
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<WritethroughResult> {
-	await writeFileWithFallback(dst, content, file, resolveWriteEncoding(dst, true));
+	// The encoding must follow the write's actual kind: a NEW file takes the
+	// policy's newFileEncoding rule, an update keeps the managed encoding.
+	// Assuming `exists = true` here made creates land in the default
+	// (existing-file) encoding, silently contradicting the pre-write check.
+	const exists = await Bun.file(dst).exists();
+	await writeFileWithFallback(dst, content, file, resolveWriteEncoding(dst, exists));
 	return { finalContent: content };
 }
 

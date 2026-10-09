@@ -50,6 +50,10 @@ pub struct FileRead {
 	/// Mixed (or lone-CR) line endings the persist step cannot faithfully
 	/// restore; GBK-managed files refuse to write in that case.
 	pub endings_unrestorable: bool,
+	/// The file's original bytes are NOT reproduced by re-encoding its decoded
+	/// text (e.g. GBK maps the euro sign both to `A2 E3` and the single byte
+	/// `80`). Editing would silently change unedited bytes, so persist refuses.
+	pub bytes_unstable:       bool,
 }
 
 impl FileRead {
@@ -57,7 +61,7 @@ impl FileRead {
 	/// persists with: BOM and line endings restored, notebooks re-serialized.
 	/// GBK-managed files are strictly encode-validated here (before any write
 	/// is issued) and refuse when their original line endings cannot be
-	/// restored exactly.
+	/// restored exactly or their original bytes are not round-trip stable.
 	pub fn persist(&self, after_lf: &str) -> EditResult<String> {
 		if self.is_notebook {
 			return notebook::serialize_edited_notebook_text(
@@ -68,7 +72,12 @@ impl FileRead {
 			.map_err(|err| EditError::apply(err.to_string()));
 		}
 		if self.encoding == TextEncoding::Gbk {
-			persist_gbk_guard(&self.resolved.display, self.endings_unrestorable, after_lf)?;
+			persist_gbk_guard(
+				&self.resolved.display,
+				self.endings_unrestorable,
+				self.bytes_unstable,
+				after_lf,
+			)?;
 		}
 		let mut out = String::with_capacity(self.bom.len() + after_lf.len());
 		out.push_str(self.bom);
@@ -77,10 +86,24 @@ impl FileRead {
 	}
 }
 
-/// Write-side GBK guarantees: refuse unrestorable line endings, and verify
-/// every character of the final text has a GBK byte sequence (encoding never
-/// substitutes `?`, U+FFFD, or HTML numeric references).
-fn persist_gbk_guard(display: &str, endings_unrestorable: bool, after_lf: &str) -> EditResult<()> {
+/// Write-side GBK guarantees: refuse unrestorable line endings and files whose
+/// original bytes a re-encode would not reproduce, and verify every character
+/// of the final text has a GBK byte sequence (encoding never substitutes `?`,
+/// U+FFFD, or HTML numeric references).
+fn persist_gbk_guard(
+	display: &str,
+	endings_unrestorable: bool,
+	bytes_unstable: bool,
+	after_lf: &str,
+) -> EditResult<()> {
+	if bytes_unstable {
+		return Err(EditError::apply(format!(
+			"{display}: refusing to edit — re-encoding this file's decoded text would not reproduce \
+			 its original bytes (some byte sequences have more than one GBK spelling, e.g. the euro \
+			 sign); add a path override with encoding \"utf8\" to the encoding policy or normalize \
+			 the file deliberately outside ompg"
+		)));
+	}
 	if endings_unrestorable {
 		return Err(EditError::apply(format!(
 			"{display}: refusing to write a GBK-managed file with mixed line endings (CRLF and LF \
@@ -109,9 +132,18 @@ pub fn persist_new(policy: &PathPolicy, resolved: &Resolved, after_lf: &str) -> 
 			.map_err(|err| EditError::apply(err.to_string()));
 	}
 	if policy.resolve_encoding(&resolved.absolute, false) == Some(TextEncoding::Gbk) {
-		persist_gbk_guard(&resolved.display, false, after_lf)?;
+		// New files have no original bytes to preserve.
+		persist_gbk_guard(&resolved.display, false, false, after_lf)?;
 	}
 	Ok(after_lf.to_owned())
+}
+
+/// Root-relative, forward-slash display of `path` for error messages.
+fn pathdiff_rel(root: &Path, path: &Path) -> String {
+	match path.strip_prefix(root) {
+		Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+		Err(_) => path.to_string_lossy().into_owned(),
+	}
 }
 
 /// New-file encoding the policy assigns to `resolved` (for write requests).
@@ -283,10 +315,28 @@ impl FileCache {
 		} else {
 			self.policy.resolve_encoding(&resolved.absolute, true)
 		};
+		let mut bytes_unstable = false;
 		let (raw, encoding) = match managed_encoding {
 			None | Some(TextEncoding::Utf8) => match String::from_utf8(bytes) {
 				Ok(raw) => (raw, TextEncoding::Utf8),
 				Err(err) => {
+					// R10 recovery guidance: with a policy present but this
+					// path uncovered, the model must learn which rule gap to
+					// close — never fall back to an out-of-band rewrite.
+					if let Some(policy) = &self.policy.encoding {
+						let rel = pathdiff_rel(policy.root(), &resolved.absolute);
+						return Err(EditError::InvalidUtf8 {
+							display:     format!(
+								"{} (the encoding policy at {} does not cover this path; if the file is \
+								 GBK, add an include rule for '{}' and re-read — do not rewrite it \
+								 through shell or scripting languages)",
+								resolved.display,
+								policy.root().display(),
+								rel,
+							),
+							valid_up_to: err.utf8_error().valid_up_to(),
+						});
+					}
 					return Err(EditError::InvalidUtf8 {
 						display:     resolved.display.clone(),
 						valid_up_to: err.utf8_error().valid_up_to(),
@@ -302,7 +352,18 @@ impl FileCache {
 					)));
 				}
 				match decode_strict(&bytes, TextEncoding::Gbk) {
-					Ok(raw) => (raw, TextEncoding::Gbk),
+					Ok(raw) => {
+						// Byte stability: re-encoding the decoded text must
+						// reproduce the original bytes, or an edit would
+						// silently rewrite sequences the file never asked to
+						// change (GBK spells the euro sign both `A2 E3` and
+						// `80`). Unstable files refuse edits at persist time.
+						bytes_unstable = match encode_strict(&raw, TextEncoding::Gbk) {
+							Ok(encoded) => encoded != bytes,
+							Err(_) => true,
+						};
+						(raw, TextEncoding::Gbk)
+					},
 					Err(offset) => {
 						return Err(EditError::apply(format!(
 							"{}: invalid GBK byte sequence at offset {offset}; refusing to decode \
@@ -340,6 +401,7 @@ impl FileCache {
 			is_notebook,
 			encoding,
 			endings_unrestorable,
+			bytes_unstable,
 		});
 		self
 			.reads

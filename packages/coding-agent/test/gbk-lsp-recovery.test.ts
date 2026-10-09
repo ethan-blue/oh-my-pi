@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { ensureFileOpen } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { applyWorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
@@ -39,6 +40,8 @@ function gbk(text: string): Uint8Array<ArrayBuffer> {
 		值: [0xd6, 0xb5],
 		量: [0xc1, 0xbf],
 		变: [0xb1, 0xe4],
+		中: [0xd6, 0xd0],
+		文: [0xce, 0xc4],
 	};
 	const out: number[] = [];
 	for (const ch of text) {
@@ -184,5 +187,92 @@ describe("GBK LSP workspace edits and move failure", () => {
 		expect(after).toEqual(sourceBytes);
 		// The blocker file is untouched as well.
 		expect(new Uint8Array(await fs.readFile(blocker))).toEqual(Buffer.from("i am a file\n", "utf8"));
+	});
+});
+
+describe("review regressions R05/R06", () => {
+	let tmpDir: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gbk-lsp-reg-"));
+		await fs.mkdir(path.join(tmpDir, "src"), { recursive: true });
+		await fs.mkdir(path.join(tmpDir, ".omp"), { recursive: true });
+		await fs.writeFile(
+			path.join(tmpDir, ".omp", "encoding.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				include: ["src/**"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "gbk",
+				overrides: [],
+			}),
+			"utf8",
+		);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	it("R05: didOpen sends the policy-decoded text, not UTF-8 mojibake", async () => {
+		const file = path.join(tmpDir, "src", "a.c");
+		await Bun.write(file, Buffer.from(gbk("// 中文\nint x = 1;\n")));
+
+		const frames: string[] = [];
+		const client = {
+			name: "gbk-reg-capture",
+			config: { languageId: "c" },
+			openFiles: new Map(),
+			writeQueue: Promise.resolve(),
+			proc: {
+				stdin: {
+					write: (data: Uint8Array) => {
+						frames.push(Buffer.from(data).toString());
+						return data.byteLength;
+					},
+					flush: () => 0,
+				},
+			},
+		};
+		await ensureFileOpen(client as never, file);
+
+		const wire = frames.join("");
+		expect(wire).toContain("textDocument/didOpen");
+		// The server must see the decoded text (中文 present as escaped
+		// UTF-8 JSON), never replacement characters from a UTF-8 misread.
+		expect(wire).toContain("中文");
+		expect(wire).not.toContain("\uFFFD");
+	});
+
+	it("R06: an unrepresentable second file rejects the whole batch before any write", async () => {
+		const a = path.join(tmpDir, "src", "a.c");
+		const b = path.join(tmpDir, "src", "b.c");
+		const originalText = "// 中文\nint x = 1;\n";
+		await Bun.write(a, Buffer.from(gbk(originalText)));
+		await Bun.write(b, Buffer.from(gbk(originalText)));
+
+		let message = "";
+		try {
+			await applyWorkspaceEdit(
+				{
+					changes: {
+						[fileToUri(a)]: [
+							{ range: { start: { line: 1, character: 8 }, end: { line: 1, character: 9 } }, newText: "2" },
+						],
+						[fileToUri(b)]: [
+							{ range: { start: { line: 1, character: 8 }, end: { line: 1, character: 9 } }, newText: "😀" },
+						],
+					},
+				},
+				tmpDir,
+			);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("rejected before any write");
+		// Zero writes: BOTH files keep their original bytes.
+		expect(new Uint8Array(await fs.readFile(a))).toEqual(gbk(originalText));
+		expect(new Uint8Array(await fs.readFile(b))).toEqual(gbk(originalText));
 	});
 });

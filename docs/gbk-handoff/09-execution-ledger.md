@@ -245,6 +245,43 @@ P16 发布（全流程通过）：
 未做：integration 分支的完整构建/发布（按 08 规范留待正式升级批次）
 ```
 
+### R01—R10 复审修复（2026-10-09 下午）— 完成
+
+```text
+输入：docs/gbk-handoff/11-native-tools-incident-plan.md + 独立审查报告（R01-R10）。
+修复（全部带回归测试）：
+  R01 enabled=false：CompiledEncodingPolicy 增加 enabled 字段，resolve 恒 None；
+     禁用 stub 可缺省必填字段；Rust 3 项回归（含 UTF-8 文件不受 include 影响）。
+  R02 新文件编码：writethroughNoop 按实际存在性探测（不再恒 exists=true）；
+     TS 回归（newFileEncoding=utf8 落盘 UTF-8 字节）。
+  R03 move 编码：edit #write 的 move 分支改用 request.encoding（源编码）；
+     TS 回归（GBK 源移到 newFileEncoding=utf8 目标仍 GBK）。
+  R04 原字节：FileCache 读入时做 encode(decode(bytes))==bytes 稳定性检查，
+     不稳定（如欧元 A2E3↔80）在 persist 前拒绝；Rust 回归（未编辑字节不变）。
+  R05 LSP 文本：client.ts 四处 Bun.file().text() → readTextFileWithPolicy；
+     协议帧回归（didOpen 文本为解码后中文，无 U+FFFD）。
+  R06 批次预检：applyWorkspaceEdit 文档先 precheckTextOpEncodings（全部严格
+     编码后再写）；回归（第二文件不可编码→整批拒绝、两文件字节均不变）。
+  R07 -Download 路径：适配 zip 顶层版本目录（查找 $work/ompg.exe 或
+     $work/ompg-*/ompg.exe）。
+  R08 卸载归属：先验证 install.json 标记（repository==fork）；拒绝危险根/
+     原版目录；只删除 ompg 已知文件，未知文件保留并报告。
+  R10-A 恢复闭环：read 二进制拒绝与 Rust InvalidUtf8 均给出策略缺口指引
+     （相对路径 + "补规则后重读" + 禁止 shell 重写提示）。
+  R10-B 受保护模式：.omp/protected-mode.json（schemaVersion/enabled/
+     buildTasks[{id,exe,args}]）；bash.ts/eval.ts 执行前门控；简单调用可匹配
+     结构化构建任务（尾 * 模式），其余一律拒绝；子目录/子会话经 cwd 发现继承。
+     A01-A10 全过（37 项 gbk 套件内 10 项）。
+  R09 bench：唯一标记行消歧（编辑不再失败）；read/edit/grep 全部断言成功与
+     命中数；grep 显式传 encodingPolicy 且三模式同 pattern 同 fixture；峰值
+     RSS + 原始样本照旧。真实数字：GBK edit +33%，read/grep 噪声内；此前
+     "无回归/更快" 结论作废（见 VALIDATION.md R09 修正块）。
+测试：bun test gbk-*.test.ts → 37 pass / 0 fail；cargo test -p pi-edit
+  --test gbk_encoding → 21 pass；CI=1 test:rs → 2986/2988（2 个基线复现的
+  环境失败）；bun check 通过。
+未验证：上游构建的 A/B 性能对照（列为后续项）；真实 LSP 服务器/模型/E630。
+```
+
 ### 补充验收（2026-10-09，发布后资产更新）— 通过
 
 ```text

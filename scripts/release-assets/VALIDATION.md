@@ -1,5 +1,9 @@
 # ompg v18.8.4-gbk.1 验收记录（VALIDATION）
 
+> **2026-10-09 复审修正**：独立审查（R01—R10）发现并复现了 7 类缺陷。本文件
+> 已按修复后的代码更新；性能表数字为 R09 修正后重测值。修复细节见仓库
+> `docs/gbk-handoff/11-native-tools-incident-plan.md` 与 git log。
+
 > 由自动化验收生成；环境：Windows 10.0.26200 x64，Bun 1.4.2，rustc
 > nightly-2026-10-06 (MSVC 14.44)，单机。全部命令在本 Fork 源码树执行。
 
@@ -44,7 +48,7 @@
 | --- | --- | --- |
 | 仓库检查 | `bun check` | 通过（oxlint 0 警告、oxfmt 干净、tsgo 全包、clippy -D warnings、cargo fmt） |
 | Rust 测试 | `CI=1 bun run test:rs` | 2988 run：2986 通过 / 2 失败；2 个失败在基线 worktree（40e9368）复现一致（pi-shell output_decode、pi-builtins sed::fast_io——本机既有环境失败） |
-| GBK 工具层 | `bun test packages/coding-agent/test/gbk-*.test.ts` | 36 pass / 0 fail（四文件 19+10+4+3，含 E16/E21 确定性注入） |
+| GBK 工具层 | `bun test packages/coding-agent/test/gbk-*.test.ts` | 37 pass / 0 fail（五文件；含 R01-R06 回归、E16/E21 注入、R10 A01-A10） |
 | GBK 引擎层 | `cargo test -p pi-edit --test gbk_encoding` | 18 pass / 0 fail（另 encoding 单测 20） |
 | 全量 TS | `bun test packages/coding-agent` | 17077 例；fork 失败集与基线对照：symlink EPERM（无开发者模式）/网络/POSIX 语义类在基线同样失败；fork 引入的 fixture 断言已修复并复跑（最终数字见发布包 VALIDATION.md） |
 | 成品 smoke | `omp-windows-x64.exe --smoke-test` | ok（exit 0） |
@@ -56,9 +60,17 @@
 
 | 模式 | read p50/p95 (ms) | edit p50/p95 (ms) | grep p50/p95 (ms) | 峰值 RSS (MiB) |
 | --- | --- | --- | --- | --- |
-| utf8-baseline | 1.53 / 6.71 | 1.33 / 1.85 | 8.63 / 10.20 | 233.1 |
-| utf8-policy-unmatched | 1.54 / 3.35 | 1.44 / 2.21 | 8.38 / 10.15 | 214.7 |
-| gbk-managed | 1.36 / 3.16 | 1.37 / 1.82 | 5.57 / 7.47 | 212.6 |
+| utf8-baseline | 1.44 / 1.78 | 8.84 / 12.46 | 7.71 / 10.32 | 227.8 |
+| utf8-policy-unmatched | 1.40 / 1.76 | 8.60 / 10.85 | 7.90 / 8.83 | 237.8 |
+| gbk-managed | 1.45 / 2.78 | 11.77 / 13.85 | 8.52 / 9.89 | 220.5 |
+
+> R09 修正（2026-10-09 复审后重测）：此前版本的 edit 数字无效——被测编辑
+> 因多处匹配而快速失败，benchmark 未校验结果。修正后每次操作断言成功
+> （唯一标记行消歧、grep 断言命中数并显式传 encodingPolicy、三模式同一
+> ASCII pattern 与同一 fixture）。真实数字：GBK edit 相对 UTF-8 增加约
+> 33%（编码/解码/往返校验成本），read 与 grep 在噪声内持平。此前的
+> "GBK 更快/无回归" 结论作废。注意 utf8-baseline 是本 Fork 的无策略模式，
+> 未与未改动上游构建做对照（工具链同机同版本；上游对照列为未完成项）。
 
 策略未命中与基线差异在计时噪声内（UTF-8 无 >5% 回归）；GBK 路径因磁盘字节更少而更快。
 峰值 RSS 按模式在整个测量循环内采样 `process.memoryUsage().rss` 取最大值；三模式同量级
