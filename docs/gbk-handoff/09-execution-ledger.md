@@ -38,10 +38,10 @@
 | P11 | 安装更新兼容 | P10 | 通过（2026-10-09；install-ompg.ps1 版本目录+校验+PATH 幂等+卸载；CLI 层禁用自更新给手动步骤） |
 | P12 | 功能与兼容验收 | P04—P11 | 基本完成（2026-10-09；全量 17077 测试 vs 基线 worktree 抽样对照，见下） |
 | P13 | 性能对比 | P12 | 通过（2026-10-09；bench 三模式，策略未命中≈基线，无 >5% 回归） |
-| P14 | 成品构建 | P10—P13 | 进行中（ompg/18.8.4-gbk.1 exe 构建+smoke 通过；release-profile 重建中） |
-| P15 | 安装回退 | P14 | 未开始 |
-| P16 | GitHub Release | P15 | 未开始 |
-| P17 | 上游升级演练 | P16 | 未开始 |
+| P14 | 成品构建 | P10—P13 | 通过（2026-10-09；ompg/18.8.4-gbk.1 @ 5c3b67ef，release-profile addon，smoke ok，白名单 zip+SHA256SUMS） |
+| P15 | 安装回退 | P14 | 通过（2026-10-09；隔离目录安装/运行/卸载/PATH 幂等/原版共启全程验证） |
+| P16 | GitHub Release | P15 | 通过（2026-10-09；draft→下载核验→公开 prerelease） |
+| P17 | 上游升级演练 | P16 | 通过（2026-10-09；integration/gbk-v18.8.5 merge v18.8.5，冲突解决+编码门禁通过，已推送） |
 
 ### P00｜现场与基线 — 通过
 
@@ -191,6 +191,58 @@
 未验证：真实模型调用（不依赖）；E630 工程（未提供）；成品安装/共启（P15）
 ```
 
+### P14–P16｜构建、安装与 GitHub Release — 通过（2026-10-09）
+
+```text
+P14 构建：
+  构建 SHA：5c3b67efbba58ddf8568ca7f7cba1d1ca32e3ea6（feat/gbk-text-io，干净树）
+  命令：bun run build:native（OMP_NATIVE_CARGO_PROFILE=release）→
+        bun scripts/ci-release-build-binaries.ts --targets win32-x64
+  产物：packages/coding-agent/binaries/omp-windows-x64.exe（234,312,192 B）
+  验证：--version → ompg/18.8.4-gbk.1；--smoke-test → ok；
+        addon 嵌入（encodingDecodeStrict 符号在 exe 内）并暂存至 ~/.ompg/natives/18.8.4/（fork 缓存根）
+  打包：bun scripts/package-ompg-release.ts --version 18.8.4-gbk.1
+        → release-staging/ompg-18.8.4-gbk.1-windows-x64.zip（白名单：ompg.exe/install-ompg.ps1/
+          README.zh-CN.md/encoding.example.json/build-info.json/LICENSE/THIRD-PARTY-NOTICES.txt）
+          + SHA256SUMS.txt + RELEASE_NOTES.md + VALIDATION.md
+  注：tag 后有一个仅改 Rust 测试文件的修复提交（57c7a7e99f，lib 代码与构建 SHA 一致，
+      不影响已发布二进制）；另有一个 .gitignore 提交（0faeb6873b）。
+
+P15 安装/回退（隔离目录演练，全部通过）：
+  安装：install-ompg.ps1 -InstallDir <temp> → versions/18.8.4-gbk.1/ompg.exe + 根 ompg.cmd(+硬链)
+        + 用户 PATH 幂等追加；版本取自二进制 --version 输出（ompg/18.8.4-gbk.1）
+  运行：<install>/ompg.cmd --version → ompg/18.8.4-gbk.1
+  共启：原版 C:\Users\Ethan\AppData\Local\omp\omp.exe --version → omp/18.2.11，全程未被写入
+  卸载：-Uninstall → install 目录删除、PATH 条目移除（复查 [Environment]::GetEnvironmentVariable
+        ('Path','User') 无 ompg-p15）、~/.ompg 数据保留、原版仍可用
+
+P16 发布（全流程通过）：
+  冲突检查：git ls-remote 无 v18.8.4-gbk.1；gh repo ethan-blue/oh-my-pi
+  tag：git tag -a v18.8.4-gbk.1 5c3b67ef…（指向构建 commit）→ push origin refs/tags/…
+  创建：gh release create … --verify-tag --draft --prerelease --notes-file RELEASE_NOTES.md
+  下载核验（独立目录 /tmp/ompg-verify）：gh release download →
+        sha256sum zip=d937980f…b8aac38 与 SHA256SUMS.txt 逐字节一致；
+        VALIDATION.md=81c52b02… 一致；解压后 ompg.exe --version / --smoke-test 通过；
+        build-info.json commitSha=5c3b67ef…（=tag 解引用）
+  公开：gh release edit --draft=false --prerelease（--latest 未设）
+  终态读回：isDraft=false、isPrerelease=true、publishedAt=2026-10-09T02:16:22Z、
+        3 资产（zip 116,284,801 B / SHA256SUMS.txt 263 B / VALIDATION.md 6,299 B）
+  签名：未签名（无证书）；如实记录
+```
+
+### P17｜上游升级演练 — 通过（2026-10-09）
+
+```text
+分支：integration/gbk-v18.8.5（自 feat/gbk-text-io 57c7a7e99f），已推送 origin
+目标：v18.8.5（上游 v18.8.4 之后的第一档）
+冲突：1 个（modify/delete）——上游删除 task/omp-command.ts（PI_SUBPROCESS_CMD 移除，
+      resolveOmpCommand 为死代码）。处置：接受删除；移除 fork 的 E28 重入测试（该风险面
+      已不存在）；lib 其余自动合并（Cargo.toml/catalog/sdk 等）。
+门禁（integration 分支）：bun check 通过；gbk-*.test.ts 18 pass / 0 fail；
+      pi-edit --test gbk_encoding 18 pass / 0 fail
+未做：integration 分支的完整构建/发布（按 08 规范留待正式升级批次）
+```
+
 
 ## 3. 每阶段记录模板
 
@@ -218,34 +270,38 @@
 
 | 工具/入口 | 读取边界 | 写入边界 | snapshot/rollback | 默认 UTF-8 | GBK | 证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| read | 待填写 | 不适用 | 待填写 | 未验证 | 未验证 | 待填写 |
-| edit/Hashline | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
-| write | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
-| patch | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
-| grep/AST | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
-| LSP/formatter | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
-| ACP | 待填写 | 待填写 | 待填写 | 未验证 | 未支持/未验证 | 待填写 |
-| child/extension | 待填写 | 待填写 | 待填写 | 未验证 | 未验证 | 待填写 |
+| read | readTextWithPolicy/decodeStrict（buffered+streaming+tail） | 不适用 | recordSnapshot/recordSnapshotFile（store 策略化） | 通过 | 通过（E01/E12/E24） | gbk-encoding/gbk-validation.test.ts |
+| edit/Hashline | Rust FileCache 严格解码（含 verbatim 修正） | WriteRequest.encoding→TS 端编码；persist 写前校验 | 上游 stale/plan/symlink 语义不变 | 通过 | 通过（E02-E14） | pi-edit gbk_encoding.rs 18 例 |
+| write | readCurrentWriteSource 策略化 | writethrough→writeFileWithFallback(encoding) | 快照 header 不变 | 通过 | 通过（E06/E15） | gbk-encoding.test.ts |
+| patch/apply_patch | 同 edit（全模式共享） | 同 edit + persist_new 新文件规则 | 多文件 staging 原子性（上游） | 通过 | 通过 | 同上 |
+| grep/AST | grep lossy 转码（只读）；AST 严格解码 | AST 全批次预检+字节写回 | 不适用/预检拒绝 | 通过 | 通过（E19/E20） | gbk-search-ast.test.ts |
+| LSP/formatter | edits/writethrough 策略化读写 | writeTextWithPolicy | rename 回滚策略化 | 通过 | 写路径通过；真实服务器交互未验证 | 回归+代码审查 |
+| ACP | bridge 读不受影响 | 活动桥接对 GBK 写前拒绝 | — | 通过 | 拒绝路径通过（E22） | edit-acp-bridge 回归 |
+| child/extension | 子进程重入自身（v18.8.5 起上游移除该路径） | 外部进程不在 Core 内 | — | 通过 | 边界声明于 README/Notes | P15 演练/P17 审计 |
 
 ## 5. 发布证明模板
 
 ```text
-Release URL：
-Tag：
-Tag 解引用完整 SHA：
-分支与代码审查范围：
-上游 baseVersion / Fork version：
-构建 SHA / 构建时间 / 平台：
-Bun / Rust / linker / native ABI：
-资产清单：名称、大小、SHA-256
-下载核验目录与命令：
-成品 GBK 测试结果：
-原版共存结果：
-签名状态：
-E630 验收状态：
-已知限制：
-安装、更新、回退命令：
-isDraft / isPrerelease：
+Release URL：https://github.com/ethan-blue/oh-my-pi/releases/tag/v18.8.4-gbk.1
+Tag：v18.8.4-gbk.1（annotated）
+Tag 解引用完整 SHA：5c3b67efbba58ddf8568ca7f7cba1d1ca32e3ea6
+分支与代码审查范围：feat/gbk-text-io（10 个任务提交，见 git log 40e9368..57c7a7e99f）
+上游 baseVersion / Fork version：18.8.4 / 18.8.4-gbk.1
+构建 SHA / 构建时间 / 平台：5c3b67ef… / 2026-10-09 / windows-x64
+Bun / Rust / linker / native ABI：Bun 1.4.2 / nightly-2026-10-06 / MSVC 14.44 / win32-x64-modern（release profile）
+资产清单：
+  ompg-18.8.4-gbk.1-windows-x64.zip  116,284,801 B  SHA-256 d937980ff9d11490f168078d3d0d50f7b216256b219d2ad7594efefe0b8aac38
+  SHA256SUMS.txt                      263 B
+  VALIDATION.md                       6,299 B         SHA-256 81c52b028c00c7cba29e02a400d4d9887b82e4e83dc2f4549d0ce11d930b0b0c
+下载核验目录与命令：/tmp/ompg-verify；gh release download v18.8.4-gbk.1 --repo ethan-blue/oh-my-pi；sha256sum
+成品 GBK 测试结果：--version=ompg/18.8.4-gbk.1、--smoke-test ok、build-info SHA=tag SHA、
+  addon 嵌入且暂存至 fork 缓存根（源码级 GBK 字节证据见 VALIDATION.md E 矩阵）
+原版共存结果：omp/18.2.11 安装与数据全程未动（P15 安装/卸载/共启演练）
+签名状态：未签名
+E630 验收状态：未验证（工程/编译器未提供）
+已知限制：见 RELEASE_NOTES.md「已知限制」
+安装、更新、回退命令：install-ompg.ps1（-Download -Version / -Uninstall）；ompg update 禁用给手动步骤
+isDraft / isPrerelease：false / true（publishedAt 2026-10-09T02:16:22Z）
 ```
 
 ## 6. 阻塞与继续原则
