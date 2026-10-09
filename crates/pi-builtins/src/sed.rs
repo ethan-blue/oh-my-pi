@@ -6189,7 +6189,7 @@ mod tests {
 	}
 
 	/// Truncating an input file after sed opened it must not fault the host
-	/// process; the reader keeps serving the bytes captured at open.
+	/// process. Unix serves its eager snapshot; Windows streams the now-empty file.
 	#[test]
 	fn test_file_truncated_after_open() -> io::Result<()> {
 		let mut tmp = NamedTempFile::new()?;
@@ -6206,7 +6206,7 @@ mod tests {
 			assert_eq!(chunk.as_bytes(), [b'.'; 4095]);
 			lines += 1;
 		}
-		assert_eq!(lines, 4);
+		assert_eq!(lines, if cfg!(unix) { 4 } else { 0 });
 		Ok(())
 	}
 
