@@ -38,6 +38,7 @@ pub mod fd;
 pub mod file_lock;
 pub mod glob;
 pub mod glob_util;
+pub mod grammars;
 pub mod grep;
 pub mod highlight;
 pub mod html;

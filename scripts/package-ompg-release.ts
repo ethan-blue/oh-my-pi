@@ -3,22 +3,23 @@
  * Packages the ompg (GBK fork) Windows x64 distribution.
  *
  * Inputs (built by earlier gates):
- *   packages/coding-agent/binaries/omp-windows-x64.exe  — compiled from the release commit
+ *   packages/coding-agent/dist/omp.exe                 — compiled from the release commit
  *   packages/natives/native/pi_natives.win32-x64-modern.node — the native addon embedded at compile time
  *   scripts/install-ompg.ps1                            — fork installer
  *
- * Output: release-staging/
+ * Output: release-staging/<version>/ (previous release assets are preserved)
  *   ompg-<version>-windows-x64.zip   — ompg.exe, install-ompg.ps1, README.zh-CN.md,
  *                                      encoding.example.json, build-info.json, LICENSE,
  *                                      THIRD-PARTY-NOTICES.txt
  *   SHA256SUMS.txt                   — hashes of every published asset (not itself)
  *
- * Usage: bun scripts/package-ompg-release.ts [--version 18.8.4-gbk.1] [--sha <git-sha>]
+ * Usage: bun scripts/package-ompg-release.ts [--version 18.8.7-gbk.1] [--sha <git-sha>]
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { $ } from "bun";
+import { version as upstreamVersion } from "../packages/utils/package.json" with { type: "json" };
 
 const args = process.argv.slice(2);
 function argValue(name: string): string | undefined {
@@ -29,9 +30,9 @@ function argValue(name: string): string | undefined {
 }
 
 const root = import.meta.dir.replace(/[/\\]scripts$/, "");
-const staging = path.join(root, "release-staging");
-
-const version = argValue("version") ?? "18.8.4-gbk.1";
+const version = argValue("version") ?? `${upstreamVersion}-gbk.1`;
+if (!/^[A-Za-z0-9][A-Za-z0-9.\-]*$/.test(version)) throw new Error("Invalid release version");
+const staging = path.join(root, "release-staging", version);
 const sha = argValue("sha") ?? (await $`git rev-parse HEAD`.cwd(root).quiet().text()).trim();
 const dirty = (await $`git status --porcelain`.cwd(root).quiet().text()).trim();
 if (dirty) {
@@ -39,16 +40,19 @@ if (dirty) {
 	process.exit(1);
 }
 
-const exeSource = path.join(root, "packages", "coding-agent", "binaries", "omp-windows-x64.exe");
+const exeSource = path.join(root, "packages", "coding-agent", "dist", "omp.exe");
 const addonPath = path.join(root, "packages", "natives", "native", "pi_natives.win32-x64-modern.node");
 for (const required of [exeSource, addonPath, path.join(root, "scripts", "install-ompg.ps1")]) {
 	await fs.access(required);
 }
 
-await fs.rm(staging, { recursive: true, force: true });
+const reportedVersion = (await $`${exeSource} --version`.quiet().text()).trim();
+if (reportedVersion !== `ompg/${version}`) throw new Error(`Binary version mismatch: ${reportedVersion}`);
+const currentSha = (await $`git rev-parse HEAD`.cwd(root).quiet().text()).trim();
+if (sha !== currentSha) throw new Error("Release SHA must match HEAD");
 await fs.mkdir(staging, { recursive: true });
 const archiveDir = path.join(staging, `ompg-${version}-windows-x64`);
-await fs.mkdir(archiveDir, { recursive: true });
+await fs.mkdir(archiveDir);
 
 await fs.copyFile(exeSource, path.join(archiveDir, "ompg.exe"));
 await fs.copyFile(path.join(root, "scripts", "install-ompg.ps1"), path.join(archiveDir, "install-ompg.ps1"));
@@ -73,7 +77,7 @@ const buildInfo = {
 	repository: "ethan-blue/oh-my-pi",
 	upstreamRepository: "can1357/oh-my-pi",
 	version,
-	upstreamBaseVersion: "18.8.4",
+	upstreamBaseVersion: upstreamVersion,
 	commitSha: sha,
 	platform: "windows-x64",
 	bunVersion,
@@ -89,6 +93,16 @@ const buildInfo = {
 	builtAt: new Date().toISOString(),
 };
 await fs.writeFile(path.join(archiveDir, "build-info.json"), JSON.stringify(buildInfo, null, "\t") + "\n", "utf8");
+
+const payloadSums: string[] = [];
+for (const entry of await fs.readdir(archiveDir, { withFileTypes: true })) {
+	if (!entry.isFile()) continue;
+	const hash = createHash("sha256")
+		.update(await fs.readFile(path.join(archiveDir, entry.name)))
+		.digest("hex");
+	payloadSums.push(`${hash}  ${entry.name}`);
+}
+await fs.writeFile(path.join(archiveDir, "SHA256SUMS.txt"), payloadSums.join("\n") + "\n", "utf8");
 
 const zipPath = path.join(staging, `ompg-${version}-windows-x64.zip`);
 if (process.platform === "win32") {

@@ -18,7 +18,7 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { fileToUri, uriToFile } from "./utils";
+import { fileToUri, readTextFromDisk, uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -165,8 +165,7 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
  * strictly re-encode on write, so a workspace edit never flips the charset.
  */
 export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const bytes = await Bun.file(filePath).bytes();
-	const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
+	const content = await readTextFromDisk(filePath);
 	const result = applyTextEditsToString(content, edits);
 	await writeTextWithPolicy(filePath, result);
 }
@@ -195,8 +194,7 @@ export async function writeTextWithPolicy(filePath: string, text: string): Promi
 
 /** Read a file through the encoding policy (GBK-managed files decode strictly). */
 export async function readTextFileWithPolicy(filePath: string): Promise<string> {
-	const bytes = await Bun.file(filePath).bytes();
-	return readTextWithPolicy(path.dirname(filePath), filePath, bytes).text;
+	return readTextFromDisk(filePath);
 }
 
 /** A reference file and the text edits a rename computed for it. */

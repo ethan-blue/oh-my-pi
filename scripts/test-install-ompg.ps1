@@ -1,4 +1,4 @@
-param([string]$ReleaseExe)
+param([string]$ReleaseExe, [string]$PreviousExe)
 $ErrorActionPreference = 'Stop'
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ('ompg-installer-test-' + [guid]::NewGuid().ToString('N'))
 $installer = Join-Path $PSScriptRoot 'install-ompg.ps1'
@@ -58,8 +58,20 @@ try {
         Copy-Item -LiteralPath $installer -Destination $package
         Copy-Item -LiteralPath $ReleaseExe -Destination (Join-Path $package 'ompg.exe')
         $releaseRoot = Join-Path $sandbox 'real-install'
+        if ($PreviousExe) {
+            $oldPackage = Join-Path $sandbox 'previous-release'
+            New-Item -ItemType Directory -Path $oldPackage | Out-Null
+            Copy-Item -LiteralPath $installer -Destination $oldPackage
+            Copy-Item -LiteralPath $PreviousExe -Destination (Join-Path $oldPackage 'ompg.exe')
+            Invoke-Installer $oldPackage $releaseRoot
+            Assert-Equal (Get-FileHash -LiteralPath (Join-Path $releaseRoot 'ompg.exe')).Hash (Get-FileHash -LiteralPath $PreviousExe).Hash 'previous release bytes'
+        }
         Invoke-Installer $package $releaseRoot
         Assert-Equal (Get-FileHash -LiteralPath (Join-Path $releaseRoot 'ompg.exe')).Hash (Get-FileHash -LiteralPath $ReleaseExe).Hash 'real release installed bytes'
+        if ($PreviousExe) {
+            Invoke-Installer $oldPackage $releaseRoot
+            Assert-Equal (Get-FileHash -LiteralPath (Join-Path $releaseRoot 'ompg.exe')).Hash (Get-FileHash -LiteralPath $PreviousExe).Hash 'real release rollback bytes'
+        }
         Invoke-Installer $package $releaseRoot @('-Uninstall')
     }
     Assert-Equal ([Environment]::GetEnvironmentVariable('Path', 'User')) $originalPath 'user PATH unchanged'

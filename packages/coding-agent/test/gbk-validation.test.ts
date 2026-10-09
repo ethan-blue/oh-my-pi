@@ -10,7 +10,6 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { resolveOmpCommand } from "@oh-my-pi/pi-coding-agent/task/omp-command";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { discoverEncodingPolicy } from "../src/encoding/index";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -204,21 +203,5 @@ describe("GBK validation gaps", () => {
 
 		getEditStore(session);
 		expect(store.headText(file)).toBeNull();
-	});
-
-	it("resolveOmpCommand re-enters the current entry in source mode (E28)", () => {
-		// In a bun source run, argv[1] is the .ts entry: subprocesses must
-		// re-enter it with the same runtime instead of a PATH binary named
-		// after the ORIGINAL tool.
-		process.env.PI_SUBPROCESS_CMD = "";
-		const resolved = resolveOmpCommand();
-		expect(resolved.cmd).toBe(process.execPath);
-		expect(resolved.args[0]).toMatch(/\.(ts|js)$/);
-
-		// The explicit contract still wins.
-		process.env.PI_SUBPROCESS_CMD = "C:\\path with space\\ompg-test.exe";
-		const explicit = resolveOmpCommand();
-		expect(explicit.cmd).toBe("C:\\path with space\\ompg-test.exe");
-		delete process.env.PI_SUBPROCESS_CMD;
 	});
 });

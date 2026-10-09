@@ -3,7 +3,7 @@ import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted 
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange, readTextFileWithPolicy } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import type {
@@ -18,7 +18,7 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types";
-import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./utils";
+import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
 
 // =============================================================================
 // Client State
@@ -1295,7 +1295,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 
 		let content: string;
 		try {
-			content = await readTextFileWithPolicy(filePath);
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1383,7 +1383,7 @@ export async function reconcileFileFromDisk(
 
 		let content: string;
 		try {
-			content = await readTextFileWithPolicy(filePath);
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1533,7 +1533,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	if (!info) return; // File not open, nothing to notify
 
 	throwIfAborted(signal);
-	const text = saveIncludesText(client) ? await readTextFileWithPolicy(filePath) : undefined;
+	const text = saveIncludesText(client) ? await readTextFromDisk(filePath) : undefined;
 	throwIfAborted(signal);
 	await sendNotification(
 		client,
@@ -1634,7 +1634,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 
 		let content: string;
 		try {
-			content = await readTextFileWithPolicy(filePath);
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
