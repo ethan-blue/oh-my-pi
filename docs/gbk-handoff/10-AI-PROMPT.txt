@@ -1,5 +1,7 @@
 请直接接手这个项目，按下述工作包完成 OMP 原生 GBK 支持、与原版兼容、Windows 构建和 GitHub Release 发布。不要只给建议、只改文档、只写 helper 后就停止。
 
+2026-10-09 补充：已有实现和预发布，下文“尚未实现”属于初始交接快照。接手必须先读当前台账、R01—R09 审查及 docs/gbk-handoff/11-native-tools-incident-plan.md。用户报告原生 edit 编码失败后 Agent 经 bash/Python 改写文件；P09 重新打开，不能沿用历史通过结论。
+
 一、工作位置和现状
 
 工作目录：D:\Projects\GitProjects\oh-my-pi
@@ -28,6 +30,7 @@
 11. docs/gbk-handoff/07-build-and-release.md
 12. docs/gbk-handoff/08-upstream-maintenance.md
 13. docs/gbk-handoff/09-execution-ledger.md
+14. docs/gbk-handoff/11-native-tools-incident-plan.md
 
 三、已经确定的方向
 
@@ -57,6 +60,8 @@
 外部 Python/PowerShell、ACP 客户端和直接 formatter --write 不自动经过 Core；不能声称全部被拦截。
 对未适配的受保护 GBK 写入，在可控制入口明确拒绝或约束，保持可用的内置路径。
 不以提示词或命令黑名单代替文件系统级保证；也不为追求全局拦截转去开发虚拟盘。
+
+补充执行 R10：未被编码规则覆盖的 .py/.c 等源码失败后，必须通过内置诊断、明确路径策略修复、重新 read 获取锚点、原生 edit/write 恢复任务；不能擅自转码或用 Python/PowerShell/Node 等改写。该项目源码读取检索使用 read/grep/glob，属性表生成也走原生写入。受保护模式在工具执行前限制自由 shell/eval，子 Agent、ACP、扩展和新增工具继承约束；仅提示词禁止不算完成。保留明确配置的 GCC/Keil 构建入口，核实响应文件、hook 和输出路径的权限；没有操作系统级隔离就如实说明可信构建例外，不能声称所有外部程序均被 Core 拦截。完成 R10-A01—A10 负例与恢复闭环；真实事故文件是否损坏未经字节核查不得下结论。
 
 六、与原版 OMP 兼容
 

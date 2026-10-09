@@ -80,6 +80,8 @@ P04 通过只代表 Hashline 核心闭环，不代表整个 OMP 已支持 GBK。
 
 **目标：**明确内置工具保证与任意外部程序的边界，保证 child 不丢失编码策略。
 
+**2026-10-09 重新打开：**用户报告 edit 编码失败后 Agent 用 bash/Python 改写 `.py/.c`；仅声明外部边界不足以满足该项目要求。必须执行 [R10 事故修复计划](11-native-tools-incident-plan.md) 的原生恢复、工具执行权限、可信构建和 A01—A10 验收，不以增加提示词代替实现。
+
 **范围：**`packages/coding-agent/src/task/executor.ts`、`src/task/omp-command.ts`、`src/exec/`、`src/eval/`、工具注册与扩展包装。
 
 **步骤：**

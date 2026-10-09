@@ -2,6 +2,8 @@
 
 本文件必须由接手 AI 随实现更新。初始状态来自 2026-10-08 的文档制作现场，不代表后续代码状态。
 
+> 2026-10-09 用户事故补充：用户报告原生 edit 解码失败后 Agent 经 bash/Python 改写测试文件。已添加 [R10 修复计划](11-native-tools-incident-plan.md)，状态为待实现/待验收；事故工程字节损坏情况未核实。历史阶段记录保留，P09 重新打开。R01—R09 的审查反例亦须修复后重新验收，不能沿用历史通过结论。
+
 ## 1. 当前状态
 
 > 接手会话更新：2026-10-08（实施开始）。以下"当前状态"表为文档制作时初始快照；实施进展见 §2 阶段记录。
@@ -33,7 +35,7 @@
 | P06 | patch/repair/rollback | P05 | 通过（2026-10-09；全部模式引擎共享 persist/编码路径；auto-repair 经策略读写；17 项 Rust 端到端含 patch/apply_patch/hashline/sloppy） |
 | P07 | grep/AST | P03、P06 | 通过（2026-10-09；grep 转码匹配/渲染、AST 解码偏移+严格写回+批次预检、verbatim 路径修复） |
 | P08 | LSP/formatter/ACP | P07 | 通过（2026-10-09；writethrough/批次读回/edits/rename/rollback 策略化；ACP 活动桥接对 GBK 拒绝） |
-| P09 | Shell/eval/child 边界 | P08 | 通过（2026-10-09；resolveOmpCommand 重入当前可执行；外部进程边界在 README/Notes 声明） |
+| P09 | Shell/eval/child 边界 | P08 | 重新打开（2026-10-09 用户报告绕过原生工具；R10 原生恢复/权限门禁待实现，原边界声明不构成防绕过验收） |
 | P10 | 分发身份与数据隔离 | P09 | 通过（2026-10-09；ompg/18.8.4-gbk.1、~/.ompg、XDG/LOCALAPPDATA 隔离、loader fork 缓存根） |
 | P11 | 安装更新兼容 | P10 | 通过（2026-10-09；install-ompg.ps1 版本目录+校验+PATH 幂等+卸载；CLI 层禁用自更新给手动步骤） |
 | P12 | 功能与兼容验收 | P04—P11 | 基本完成（2026-10-09；全量 17077 测试 vs 基线 worktree 抽样对照，见下） |

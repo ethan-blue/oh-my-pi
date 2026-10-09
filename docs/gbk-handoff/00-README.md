@@ -2,6 +2,8 @@
 
 文档日期：2026-10-08。工作目录：`D:\Projects\GitProjects\oh-my-pi`。
 
+> 2026-10-09 修复补充：下文初始状态是历史快照；已有实现与预发布，验收仍有缺口。用户报告的原生工具失败后改用 Python 写入事故已纳入 [R10 修复计划](11-native-tools-incident-plan.md)，与 R01—R09 同批修复。P09 重新打开，不沿用历史“通过”作为现状。
+
 ## 1. 接手目标
 
 在现有 OMP Core 上实现可明确配置的 GBK 文本读写，保留 Rust 编辑引擎、Hashline、原版 UTF-8 使用方式；提供能与原版共存的 Windows x64 构建，验收后上传个人 Fork 的 GitHub Release，并建立可重复的上游更新流程。
@@ -37,6 +39,7 @@
 8. [08：P17，上游更新与回退](08-upstream-maintenance.md)
 9. [09：执行台账与证据模板](09-execution-ledger.md)
 10. [10：可复制启动 Prompt](10-AI-PROMPT.txt)
+11. [11：R10，原生编码恢复与外部工具绕过约束](11-native-tools-incident-plan.md)
 
 先读仓库根 `AGENTS.md`、`CONTRIBUTING.md`、`packages/coding-agent/DEVELOPMENT.md`，再执行本包。遇到基线变化，以当前源码为准，同时更新本包地图，不盲套旧路径。
 
