@@ -3,6 +3,7 @@
  */
 
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { DISTRIBUTION_REPO } from "@oh-my-pi/pi-utils/dirs";
 import { updateHelp as commandHelp } from "../cli/command-help";
 import * as pluginCli from "../cli/plugin-cli";
 import * as updateCli from "../cli/update-cli";
@@ -33,6 +34,20 @@ export default class Update extends Command {
 		if (flags.plugins) {
 			await pluginCli.runPluginCommand({ action: "upgrade", args: [], flags: {} });
 		} else {
+			// ompg (fork) build: every automatic update channel installs the
+			// UPSTREAM package and would silently replace this fork. Disable
+			// self-update at the CLI surface and hand out manual steps; the
+			// plugin updater below is unaffected (it is registry-agnostic).
+			if (updateCli.FORK_DISTRIBUTION) {
+				console.log(
+					`Self-update is disabled in ompg (fork build).\n` +
+						`Download the latest release from https://github.com/${DISTRIBUTION_REPO}/releases\n` +
+						`(archive: ompg-<version>-windows-x64.zip, verify SHA256SUMS.txt),\n` +
+						`then run install-ompg.ps1 from the archive. Re-run \`ompg --version\` after installing.`,
+				);
+				if (!flags.check) process.exitCode = 1;
+				return;
+			}
 			await updateCli.runUpdateCommand({
 				force: flags.force,
 				check: flags.check,

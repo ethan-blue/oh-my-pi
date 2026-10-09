@@ -110,15 +110,20 @@ describe("update command plugin dispatch", () => {
 		expect(updateSpy).not.toHaveBeenCalled();
 	});
 
-	it("keeps normal update flags on the app updater path", async () => {
+	it("refuses the app updater path in the fork build and prints manual steps", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
 		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const logSpy = spyOn(console, "log").mockReturnValue(undefined);
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
 
-		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true, channel: undefined });
+		// ompg never pulls updates from upstream channels; the CLI hands out
+		// the manual procedure instead.
+		expect(updateSpy).not.toHaveBeenCalled();
 		expect(pluginSpy).not.toHaveBeenCalled();
+		expect(logSpy.mock.calls.some(call => String(call[0]).includes("Self-update is disabled"))).toBe(true);
+		logSpy.mockRestore();
 	});
 });
 
@@ -194,8 +199,9 @@ describe("parseReportedVersion", () => {
 		// Regression: dropping `-canary.1` made a correctly installed canary
 		// build look like a stale `X.Y.Z` launcher, triggering a binary repair
 		// that rejects the prerelease GitHub release.
-		expect(parseReportedVersion("omp/18.0.6-canary.1")).toBe("18.0.6-canary.1");
-		expect(parseReportedVersion("omp/18.0.5")).toBe("18.0.5");
+		expect(parseReportedVersion("ompg/18.0.6-canary.1")).toBe("18.0.6-canary.1");
+		expect(parseReportedVersion("ompg/18.0.5")).toBe("18.0.5");
+		expect(parseReportedVersion("omp/18.0.5")).toBeUndefined();
 		expect(parseReportedVersion("not a version")).toBeUndefined();
 	});
 

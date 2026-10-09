@@ -2234,27 +2234,6 @@ export async function runUpdateCommand(opts: {
 	channel?: UpdateChannel;
 }): Promise<void> {
 	console.log(chalk.dim(`Current version: ${VERSION}`));
-	if (FORK_DISTRIBUTION) {
-		// This is an ompg (fork) build. Every automatic channel below would
-		// pull the UPSTREAM package or binary and silently replace the fork
-		// with the official distribution, so self-update refuses and hands
-		// out the manual procedure instead.
-		console.log(
-			chalk.yellow(
-				`Self-update is disabled in ompg (fork build).
-` +
-					`Download the latest release from https://github.com/${REPO}/releases
-` +
-					`(archive: ompg-<version>-windows-x64.zip, verify SHA256SUMS.txt),
-` +
-					`then run install-ompg.ps1 from the archive. Re-run \`ompg --version\` after installing.`,
-			),
-		);
-		if (!opts.check) {
-			process.exitCode = 1;
-		}
-		return;
-	}
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
 	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;

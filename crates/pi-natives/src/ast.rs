@@ -1423,6 +1423,7 @@ mod tests {
 			None,
 			None,
 			None,
+			None,
 		)
 		.expect("mixed-language tree should rewrite per file");
 
@@ -1521,6 +1522,7 @@ mod tests {
 			None,
 			None,
 			None,
+			None,
 		)
 		.expect("identical duplicate matches should apply cleanly");
 
@@ -1574,6 +1576,7 @@ mod tests {
 			None,
 			None,
 			None,
+			None,
 		);
 		assert!(result.is_err(), "expected ast_edit to error on overlapping edits");
 
@@ -1609,6 +1612,7 @@ mod tests {
 			None,
 			None,
 			Some(false),
+			None,
 			None,
 			None,
 			None,
