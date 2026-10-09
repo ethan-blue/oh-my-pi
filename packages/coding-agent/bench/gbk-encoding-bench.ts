@@ -8,7 +8,8 @@
  *
  * Workloads: whole-file read (snapshot path), one-line edit (replace mode),
  * native grep over a 50-file directory. 5 warmup + 40 measured iterations;
- * reports p50/p95/min in milliseconds. Run:
+ * reports p50/p95/min in milliseconds, peak RSS per mode, and the raw
+ * per-iteration samples (reproducibility evidence). Run:
  *   bun packages/coding-agent/bench/gbk-encoding-bench.ts
  */
 import * as fs from "node:fs/promises";
@@ -137,12 +138,19 @@ async function runMode(mode: Mode) {
 	const readSamples: number[] = [];
 	const editSamples: number[] = [];
 	const grepSamples: number[] = [];
+	// Peak RSS observed across this mode's loop (sampled after every
+	// workload so allocations retained by the tool paths are visible).
+	let peakRssBytes = 0;
+	const sampleRss = () => {
+		peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+	};
 
 	for (let i = 0; i < WARMUP + ITERATIONS; i++) {
 		// read: whole file (snapshot path)
 		let start = performance.now();
 		await read.execute(`r-${i}`, { path: mainFile });
 		if (i >= WARMUP) readSamples.push(performance.now() - start);
+		sampleRss();
 
 		// edit: flip a marker line back and forth (real write each time)
 		const from = i % 2 === 0 ? "padding padding padding padding" : "padding padding padding padding padding";
@@ -150,12 +158,15 @@ async function runMode(mode: Mode) {
 		start = performance.now();
 		await edit.execute(`e-${i}`, { path: mainFile, old_string: from, new_string: to });
 		if (i >= WARMUP) editSamples.push(performance.now() - start);
+		sampleRss();
 
 		// grep: keyword over 50 files
 		start = performance.now();
 		await grep({ pattern: mode.writeGbk ? "基准" : "padding", path: path.join(root, "grepdir"), maxColumns: 200 });
 		if (i >= WARMUP) grepSamples.push(performance.now() - start);
+		sampleRss();
 	}
+	sampleRss();
 
 	await removeWithRetries(root);
 	const stats = (samples: number[]) => {
@@ -166,7 +177,20 @@ async function runMode(mode: Mode) {
 			min: Number(sorted[0]!.toFixed(2)),
 		};
 	};
-	return { mode: mode.name, read: stats(readSamples), edit: stats(editSamples), grep: stats(grepSamples) };
+	return {
+		mode: mode.name,
+		read: stats(readSamples),
+		edit: stats(editSamples),
+		grep: stats(grepSamples),
+		peakRssBytes,
+		// Raw per-iteration samples (ms), iteration order — reproducibility
+		// evidence for the p50/p95 figures above.
+		rawSamples: {
+			read: readSamples.map(value => Number(value.toFixed(3))),
+			edit: editSamples.map(value => Number(value.toFixed(3))),
+			grep: grepSamples.map(value => Number(value.toFixed(3))),
+		},
+	};
 }
 
 await Settings.init({ inMemory: true });
