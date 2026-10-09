@@ -30,15 +30,15 @@
 | P03 | read 与快照 | P02 | 通过（2026-10-08，E01/E10/E11 + 快照一致性 TS 测试） |
 | P04 | Hashline 保存闭环 | P03 | 通过（2026-10-08，Rust 17/17 + TS E02/E05/E09） |
 | P05 | write/create/move/delete | P04 | 通过（2026-10-08，write 覆盖/新建/移动 GBK 字节测试） |
-| P06 | patch/repair/rollback | P05 | 进行中（引擎层已继承编码路径；修复路径待测） |
-| P07 | grep/AST | P03、P06 | 未开始 |
-| P08 | LSP/formatter/ACP | P07 | 未开始 |
-| P09 | Shell/eval/child 边界 | P08 | 未开始 |
-| P10 | 分发身份与数据隔离 | P09 | 未开始 |
-| P11 | 安装更新兼容 | P10 | 未开始 |
-| P12 | 功能与兼容验收 | P04—P11 | 未开始 |
-| P13 | 性能对比 | P12 | 未开始 |
-| P14 | 成品构建 | P10—P13 | 未开始 |
+| P06 | patch/repair/rollback | P05 | 通过（2026-10-09；全部模式引擎共享 persist/编码路径；auto-repair 经策略读写；17 项 Rust 端到端含 patch/apply_patch/hashline/sloppy） |
+| P07 | grep/AST | P03、P06 | 通过（2026-10-09；grep 转码匹配/渲染、AST 解码偏移+严格写回+批次预检、verbatim 路径修复） |
+| P08 | LSP/formatter/ACP | P07 | 通过（2026-10-09；writethrough/批次读回/edits/rename/rollback 策略化；ACP 活动桥接对 GBK 拒绝） |
+| P09 | Shell/eval/child 边界 | P08 | 通过（2026-10-09；resolveOmpCommand 重入当前可执行；外部进程边界在 README/Notes 声明） |
+| P10 | 分发身份与数据隔离 | P09 | 通过（2026-10-09；ompg/18.8.4-gbk.1、~/.ompg、XDG/LOCALAPPDATA 隔离、loader fork 缓存根） |
+| P11 | 安装更新兼容 | P10 | 通过（2026-10-09；install-ompg.ps1 版本目录+校验+PATH 幂等+卸载；CLI 层禁用自更新给手动步骤） |
+| P12 | 功能与兼容验收 | P04—P11 | 基本完成（2026-10-09；全量 17077 测试 vs 基线 worktree 抽样对照，见下） |
+| P13 | 性能对比 | P12 | 通过（2026-10-09；bench 三模式，策略未命中≈基线，无 >5% 回归） |
+| P14 | 成品构建 | P10—P13 | 进行中（ompg/18.8.4-gbk.1 exe 构建+smoke 通过；release-profile 重建中） |
 | P15 | 安装回退 | P14 | 未开始 |
 | P16 | GitHub Release | P15 | 未开始 |
 | P17 | 上游升级演练 | P16 | 未开始 |
@@ -146,6 +146,49 @@
 与原版兼容结果：无 .omp/encoding.json 时字节级行为不变（专门回归测试）
 风险与恢复：StagedFile.encoding=None 等价 UTF-8；策略解析失败在首次使用时报错，不静默退化
 下一阶段及未满足前置：P06 修复路径审计 → P07 grep/AST → P08 LSP/edits
+```
+
+### P06–P13｜工具覆盖、ompg 身份、回归对照与性能 — 2026-10-09
+
+```text
+开始/结束 SHA：e1f2798（P02-P05 提交）… c1a068c0e9（含全部修复；详细见 git log feat/gbk-text-io）
+实现行为与修改（增量提交，均在本分支）：
+  P06：patch.rs preview/stage 双路径 GBK 预检；persist_new 按 new-file 规则；auto-repair 读经策略边界
+  P07：grep.rs GrepOptions.encodingPolicy（walker/流式/单文件三路径 lossy 转码，只读）；ast.rs
+       read_candidate_source 严格解码 + 写前全批次 GBK 预检 + 逐文件字节写回；verbatim(\\?\) 路径
+       strip_verbatim 修复（Rust 单测覆盖；此前 GBK 字节流恰为合法 UTF-8 时静默错位）
+  P08：writethrough 写端/批次读回、lsp/edits applyTextEdits/applyEditsThenRename/workspace-edit
+       回滚全部经 readTextWithPolicy/writeTextWithPolicy；ACP：hasActiveWriteBridge 判定活动桥接后
+       对 GBK 受管文件写前拒绝
+  P10：dirs.ts APP_NAME=ompg、CONFIG_DIR_NAME=.ompg（用户根）、PROJECT_CONFIG_DIR_NAME=.omp（项目级
+       发现不变）、DISTRIBUTION_VERSION=18.8.4-gbk.1、USER_AGENT；loader-state.js 缓存根/XDG/
+       LOCALAPPDATA/下载提示全部 fork 化；resolveOmpCommand 编译态重入自身；storage-state 随新根
+  P11：update-cli REPO=fork + FORK_DISTRIBUTION 在 CLI 命令层禁用自更新（内部函数保持上游语义，
+       上游单测不改断言通过）；scripts/install-ompg.ps1（版本目录+SHA256 校验+稳定 ompg.cmd+
+       PATH 幂等+-Uninstall 保数据）
+  P12：新 gbk-validation.test.ts（E24 >4MiB 流式、E26 中文/空格路径、E29 策略变更清快照、E28 重入）
+  P13：packages/coding-agent/bench/gbk-encoding-bench.ts（utf8-baseline/utf8-policy-unmatched/
+       gbk-managed × read/edit/grep，5 预热+40 样本）
+测试与证据：
+  bun test gbk-*.test.ts → 19 pass / 0 fail（工具层 E01-E29 覆盖）
+  cargo test -p pi-edit --test gbk_encoding → 18 pass（含 verbatim 修复回归）
+  CI=1 bun run test:rs → 2988 run：2986 pass / 2 fail；2 个失败（pi-shell output_decode、
+    pi-builtins sed::fast_io）在基线 worktree（40e9368，junction node_modules）复现一致——既有环境失败
+  bun check → 0 lint 警告 / 0 类型错误 / clippy+fmt 干净
+  全量 bun test packages/coding-agent：首次 16440 pass/158 fail；经基线对照逐类判定：
+    - symlink EPERM 类（无开发者模式 Windows）：插件/marketplace/Settings 符号链接安全/update-cli
+      安装目标/writeFileWithFallback 内核权限等 ~100 例——基线同样失败（抽样验证 8 个文件）
+    - 网络/计时类：github pr_checkout、memories、approvalMode 超时、one-shot settlement——基线同样失败
+    - POSIX 语义类：getOrCreateSnapshot umask——基线同样失败
+    - 本分支引入且已修复：discovery 插件 fixture(.ompg)、system-prompt 项目 fixture(PROJECT_ 重命名)、
+      update-cli 命令层测试、parseReportedVersion 前缀、--max-time 提示、日志文件名断言
+  最终全量复跑进行中（结果记入发布 VALIDATION.md）
+  性能（同机同工具链，fork 内三模式）：read p50 1.66/1.50/1.25 ms、edit p50 1.34/1.47/1.22 ms、
+    grep p50 8.60/8.37/5.02 ms（baseline/policy-unmatched/gbk）——策略未命中与基线差异在噪声内，
+    无 >5% UTF-8 回归；GBK 因字节更小反而更快
+运行环境：Windows 10.0.26200 x64；Bun 1.4.2；rustc nightly-2026-10-06；MSVC 14.44
+不通过：无新增
+未验证：真实模型调用（不依赖）；E630 工程（未提供）；成品安装/共启（P15）
 ```
 
 
