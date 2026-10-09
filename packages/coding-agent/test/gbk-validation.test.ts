@@ -204,6 +204,4 @@ describe("GBK validation gaps", () => {
 		getEditStore(session);
 		expect(store.headText(file)).toBeNull();
 	});
-
-;
 });
