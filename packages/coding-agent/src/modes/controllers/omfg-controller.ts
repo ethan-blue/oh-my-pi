@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
+import { PROJECT_CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
@@ -36,7 +36,7 @@ type SaveCandidateResult = { kind: "saved" | "aborted" | "rejected" } | { kind: 
 
 const MAX_ATTEMPTS = 3;
 const PROJECT_OPTION = "This project (.omp/rules)";
-const GLOBAL_OPTION = "Global — all projects (~/.omp/agent/rules)";
+const GLOBAL_OPTION = "Global — all projects (~/.ompg/agent/rules)";
 const AMEND_OPTION = "Amend with feedback…";
 
 export class OmfgController {
@@ -282,7 +282,7 @@ export class OmfgController {
 			};
 		}
 		return {
-			filePath: path.join(this.ctx.sessionManager.getCwd(), CONFIG_DIR_NAME, "rules", `${ruleName}.md`),
+			filePath: path.join(this.ctx.sessionManager.getCwd(), PROJECT_CONFIG_DIR_NAME, "rules", `${ruleName}.md`),
 			level: "project",
 		};
 	}

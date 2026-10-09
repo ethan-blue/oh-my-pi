@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+import { PROJECT_CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled } from "./capability";
 import { resolveClaudePaths } from "./config/claude-paths";
 import { expandTilde } from "./tools/path-utils";
@@ -9,7 +9,7 @@ import { expandTilde } from "./tools/path-utils";
 export * from "./config/config-file";
 
 const priorityList = [
-	{ dir: CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
+	{ dir: PROJECT_CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
 	{ dir: ".claude" },
 	{ dir: ".codex" },
 	{ dir: ".gemini" },
@@ -78,7 +78,7 @@ export function getChangelogPath(): string | undefined {
 // =============================================================================
 
 /**
- * User-level: ~/.omp/agent, Claude's active config directory, ~/.codex, ~/.gemini
+ * User-level: ~/.ompg/agent, Claude's active config directory, ~/.codex, ~/.gemini
  * Project-level: .omp, .claude, .codex, .gemini
  */
 const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
@@ -99,7 +99,7 @@ export interface ConfigDirEntry {
 }
 
 export interface GetConfigDirsOptions {
-	/** Include user-level directories (~/.omp/agent/...). Default: true */
+	/** Include user-level directories (~/.ompg/agent/...). Default: true */
 	user?: boolean;
 	/** Include project-level directories (.omp/...). Default: true */
 	project?: boolean;
@@ -119,7 +119,7 @@ export interface GetConfigDirsOptions {
  * @example
  * // Get all command directories
  * getConfigDirs("commands")
- * // → [{ path: "~/.omp/agent/commands", source: ".omp", level: "user" }, ...]
+ * // → [{ path: "~/.ompg/agent/commands", source: ".omp", level: "user" }, ...]
  *
  * @example
  * // Get only existing project skill directories
@@ -132,7 +132,7 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
 	// User-level directories (highest priority)
 	if (user) {
 		for (const { base, name } of USER_CONFIG_BASES) {
-			if (name !== CONFIG_DIR_NAME && !isUserSourceEnabled(name.replace(/^\./, ""))) {
+			if (name !== PROJECT_CONFIG_DIR_NAME && !isUserSourceEnabled(name.replace(/^\./, ""))) {
 				continue;
 			}
 			const resolvedPath = path.resolve(base(), subpath);

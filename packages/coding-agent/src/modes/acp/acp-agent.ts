@@ -618,7 +618,7 @@ export class AcpAgent implements Agent {
 			{
 				id: "agent",
 				name: "Use existing local credentials",
-				description: "Authenticate via the provider keys/OAuth state already configured under ~/.omp.",
+				description: "Authenticate via the provider keys/OAuth state already configured under ~/.ompg.",
 			},
 		];
 		if (params.clientCapabilities?.auth?.terminal === true) {

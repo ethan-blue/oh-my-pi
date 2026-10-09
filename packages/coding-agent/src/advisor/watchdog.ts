@@ -80,7 +80,7 @@ export async function collectConfigCandidates(
 
 	const candidates = new Set<string>();
 
-	// 1. User level: ~/.omp/<F> (or active profile agent dir)
+	// 1. User level: ~/.ompg/<F> (or active profile agent dir)
 	if (resolvedAgentDir) {
 		for (const filename of filenames) {
 			const userPath = path.resolve(resolvedAgentDir, filename);

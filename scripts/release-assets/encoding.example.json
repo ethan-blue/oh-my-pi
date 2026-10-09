@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"enabled": true,
+	"include": ["src/**/*.c", "src/**/*.h", "resources/**/*.rc"],
+	"defaultEncoding": "gbk",
+	"newFileEncoding": "gbk",
+	"overrides": [{ "glob": "src/vendor-utf8/**", "encoding": "utf8" }]
+}

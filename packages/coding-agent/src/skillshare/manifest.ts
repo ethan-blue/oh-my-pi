@@ -62,7 +62,7 @@ export function parseSkillId(id: string): { scope: string; name: string } | null
 	return { scope: id.slice(1, slash), name: id.slice(slash + 1) };
 }
 
-/** Manifest + lock paths for the user-global install (`~/.omp/agent/`). */
+/** Manifest + lock paths for the user-global install (`~/.ompg/agent/`). */
 export function getGlobalSkillsInstallPaths(): SkillsInstallPaths {
 	return installPathsIn(getAgentDir());
 }

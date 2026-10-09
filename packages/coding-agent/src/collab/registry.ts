@@ -159,7 +159,7 @@ export class CollabLinkError extends Error {
 
 /**
  * Discovery metadata directory. Deliberately under the profile-independent
- * config root (`~/.omp/run/collab-hosts`) — unlike the launch broker's
+ * config root (`~/.ompg/run/collab-hosts`) — unlike the launch broker's
  * profile-scoped runtime dir — so hosts started under any profile are
  * discoverable from any other (issue #6099 user story 18).
  */

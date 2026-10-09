@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
-	CONFIG_DIR_NAME,
+	PROJECT_CONFIG_DIR_NAME,
 	getAgentDir,
 	getConfigDirName,
 	getPluginsDir,
@@ -45,7 +45,7 @@ export const SOURCE_PATHS = {
 		get userAgent() {
 			return `${getConfigDirName()}/agent`;
 		},
-		projectDir: CONFIG_DIR_NAME,
+		projectDir: PROJECT_CONFIG_DIR_NAME,
 	},
 	claude: {
 		userBase: ".claude",
@@ -1048,7 +1048,7 @@ function isUserConfigRoot(root: string): boolean {
  */
 export async function resolveActiveProjectRegistryPath(cwd: string): Promise<string | null> {
 	// Pass 1: walk up looking for an existing .omp/ directory (nearest wins).
-	// Stop before os.homedir() — ~/.omp/ is the user-level config dir, not a project root.
+	// Stop before os.homedir() — ~/.ompg/ is the user-level config dir, not a project root.
 	const homeDir = normalizePathForComparison(os.homedir());
 	let dir = path.resolve(cwd);
 	while (normalizePathForComparison(dir) !== homeDir) {
@@ -1157,7 +1157,7 @@ export function registerPluginCacheInvalidator(invalidator: () => void): void {
 
 /**
  * List all installed Claude Code plugin roots from its active plugin cache and
- * ~/.omp/plugins/installed_plugins.json, plus the nearest project registry when present.
+ * ~/.ompg/plugins/installed_plugins.json, plus the nearest project registry when present.
  *
  * Results are cached per Claude and OMP config directories, project registry, and canonical active project.
  */

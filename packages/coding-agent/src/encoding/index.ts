@@ -39,6 +39,14 @@ export interface DiscoveredEncodingPolicy {
 }
 
 const policyCache = new Map<string, DiscoveredEncodingPolicy>();
+/**
+ * Negative results (no policy anywhere above `cwd`), with a short TTL: a
+ * policy-less project would otherwise re-walk the whole parent chain on
+ * every file read. The TTL bounds how long a newly created policy file can
+ * go unnoticed (mtime revalidation covers edits to an existing one).
+ */
+const NEGATIVE_CACHE_TTL_MS = 1000;
+const negativeCache = new Map<string, number>();
 
 /**
  * Find the nearest `.omp/encoding.json` at or above `cwd` and return its
@@ -48,8 +56,13 @@ const policyCache = new Map<string, DiscoveredEncodingPolicy>();
  * mtime so editing the policy takes effect on the next resolution.
  */
 export function discoverEncodingPolicy(cwd: string): DiscoveredEncodingPolicy | undefined {
+	const start = path.resolve(cwd);
+	const negativeAt = negativeCache.get(start);
+	if (negativeAt !== undefined && Date.now() - negativeAt < NEGATIVE_CACHE_TTL_MS) {
+		return undefined;
+	}
 	const home = os.homedir();
-	let dir = path.resolve(cwd);
+	let dir = start;
 	for (;;) {
 		const configPath = path.join(dir, ENCODING_CONFIG_RELATIVE);
 		let stat: fs.Stats | undefined;
@@ -72,7 +85,10 @@ export function discoverEncodingPolicy(cwd: string): DiscoveredEncodingPolicy | 
 			policyCache.set(dir, discovered);
 			return discovered;
 		}
-		if (dir === home || path.dirname(dir) === dir) return undefined;
+		if (dir === home || path.dirname(dir) === dir) {
+			negativeCache.set(start, Date.now());
+			return undefined;
+		}
 		dir = path.dirname(dir);
 	}
 }

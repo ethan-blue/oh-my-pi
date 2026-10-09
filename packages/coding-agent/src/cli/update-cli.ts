@@ -31,10 +31,17 @@ import {
 
 import { cfgUpdateChannel } from "../modes/settings";
 
-const REPO = "can1357/oh-my-pi";
+const REPO = "ethan-blue/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
+/**
+ * ompg (fork) builds are distributed as GitHub release archives from
+ * `ethan-blue/oh-my-pi`, never through npm/Homebrew/mise — those channels
+ * would install the UPSTREAM package and silently replace this fork.
+ * Self-update is therefore disabled; `ompg update` prints manual steps.
+ */
+export const FORK_DISTRIBUTION = true;
 const NIX_STORE_DIR = "/nix/store";
 const GITHUB_API = "https://api.github.com";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
@@ -2227,6 +2234,27 @@ export async function runUpdateCommand(opts: {
 	channel?: UpdateChannel;
 }): Promise<void> {
 	console.log(chalk.dim(`Current version: ${VERSION}`));
+	if (FORK_DISTRIBUTION) {
+		// This is an ompg (fork) build. Every automatic channel below would
+		// pull the UPSTREAM package or binary and silently replace the fork
+		// with the official distribution, so self-update refuses and hands
+		// out the manual procedure instead.
+		console.log(
+			chalk.yellow(
+				`Self-update is disabled in ompg (fork build).
+` +
+					`Download the latest release from https://github.com/${REPO}/releases
+` +
+					`(archive: ompg-<version>-windows-x64.zip, verify SHA256SUMS.txt),
+` +
+					`then run install-ompg.ps1 from the archive. Re-run \`ompg --version\` after installing.`,
+			),
+		);
+		if (!opts.check) {
+			process.exitCode = 1;
+		}
+		return;
+	}
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
 	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
