@@ -8,8 +8,8 @@
 
 | Issue | 结论 | 证据和边界 |
 | --- | --- | --- |
-| [#1](https://github.com/ethan-blue/oh-my-pi/issues/1) | PASS，源码推送后可关闭 | 静态提示模板由实际运行时目录 helper 填充，SDK agentDir 贯穿提示构建；不硬编码用户目录，不暴露配置或密钥。默认、自定义模板及子 Agent 路径有回归。SDK 完全替换 systemPrompt 的字符串/数组/回调仍由调用方控制，可主动省略身份模板；不能保证模型永不误报。 |
-| [#2](https://github.com/ethan-blue/oh-my-pi/issues/2) | PASS，源码推送后可关闭 | setModel 接受 Model 或字符串，复用现有角色/模型解析器；无凭证和非法选择失败且不改变模型。命令上下文避免对象展开造成 getter 快照；事件、注册命令和无 runner 的 custom-command 在 await 后读取即时模型均有行为回归。 |
+| [#1](https://github.com/ethan-blue/oh-my-pi/issues/1) | PASS，已关闭 | 静态提示模板由实际运行时目录 helper 填充，SDK agentDir 贯穿提示构建；不硬编码用户目录，不暴露配置或密钥。默认、自定义模板及子 Agent 路径有回归。SDK 完全替换 systemPrompt 的字符串/数组/回调仍由调用方控制，可主动省略身份模板；不能保证模型永不误报。 |
+| [#2](https://github.com/ethan-blue/oh-my-pi/issues/2) | PASS，已关闭 | setModel 接受 Model 或字符串，复用现有角色/模型解析器；无凭证和非法选择失败且不改变模型。命令上下文避免对象展开造成 getter 快照；事件、注册命令和无 runner 的 custom-command 在 await 后读取即时模型均有行为回归。 |
 | [#3](https://github.com/ethan-blue/oh-my-pi/issues/3) | PARTIAL，保持 OPEN | G1/G2/G3 和 G6 的写前保护、严格解码及诊断通过；G4 的双重合法编码歧义诊断、G5 的子进程输出编码协议仍未实现。不能用部分修复关闭六项集合。 |
 
 本轮不发表评论，不改用户 E630 文件，不修改用户安装。关闭源码缺陷不意味着已经发布新的二进制。
@@ -43,4 +43,6 @@
 
 ## 后续执行
 
-将本轮修复提交并推送后，按用户授权关闭 #1/#2（不附评论），读取 GitHub 状态确认；#3 保持开放。G4/G5 的下一 AI 任务与禁止项以设计文档及编码验收文档为准。
+修复已提交并推送：[b65a86c806](https://github.com/ethan-blue/oh-my-pi/commit/b65a86c806c81fc04801855a354bf601af978406)。远端分支 SHA 已读取核对一致。
+
+按用户授权在源码推送成功后关闭 #1/#2，不附评论。GitHub 读取确认 #1 于 `2026-10-11T00:10:09Z`、#2 于 `2026-10-11T00:10:10Z` 关闭；#3 仍为 OPEN。G4/G5 的下一 AI 任务与禁止项以设计文档及编码验收文档为准。
