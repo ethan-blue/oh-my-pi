@@ -248,7 +248,7 @@ async function readWholeFile(absolutePath: string): Promise<Buffer | undefined> 
  * hash, and any later edit all agree on one text.
  */
 function deriveBufferedFileText(bytes: Buffer, encoding?: "gbk"): BufferedFileText {
-	const rawText = encoding === "gbk" ? decodeStrict(bytes, "gbk") : bytes.toString("utf-8");
+	const rawText = decodeStrict(bytes, encoding ?? "utf8");
 	const strippedText = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
 	// `normalizeToLF` allocates a copy; skip it outright for the common LF file.
 	const normalizedText = strippedText.includes("\r") ? normalizeToLF(strippedText) : strippedText;
@@ -371,8 +371,7 @@ function collectLineWindowFromBuffer(
 		// Preview covers the first selected line only, capped at the byte budget:
 		// the oversized-first-line branch renders it when no full line fits.
 		if (window.lines.length === 0 && window.firstLinePreview === undefined && lineByteLength > 0) {
-			const previewEnd = Math.min(lineEnd, lineStart + maxBytes);
-			const { text, bytes: previewBytes } = truncateHeadBytes(bytes.subarray(lineStart, previewEnd), maxBytes);
+			const { text, bytes: previewBytes } = truncateHeadBytes(Buffer.from(rawSegments[index]!, "utf8"), maxBytes);
 			window.firstLinePreview = { text, bytes: previewBytes };
 		}
 
@@ -503,9 +502,9 @@ async function streamLinesFromFile(
 					: Buffer.concat([...currentLineChunks, ...(pendingSegment ? [pendingSegment] : [])], currentLineLength);
 			return decodeStrict(whole, "gbk");
 		}
-		if (currentLineChunks.length === 0) return pendingSegment?.toString("utf-8") ?? "";
+		if (currentLineChunks.length === 0) return pendingSegment ? decodeStrict(pendingSegment, "utf8") : "";
 		if (pendingSegment) currentLineChunks.push(pendingSegment);
-		return Buffer.concat(currentLineChunks, currentLineLength).toString("utf-8");
+		return decodeStrict(Buffer.concat(currentLineChunks, currentLineLength), "utf8");
 	};
 
 	const maybeCapturePreview = (segment: Uint8Array) => {
@@ -577,6 +576,7 @@ async function streamLinesFromFile(
 
 	setupLineState();
 
+	const validationDecoder = new TextDecoder(encoding ?? "utf-8", { fatal: true });
 	try {
 		fileHandle = await fs.open(filePath, "r");
 		// Offsets from an earlier scan only hold for the same, unchanged file.
@@ -596,6 +596,7 @@ async function streamLinesFromFile(
 
 			sawAnyByte = true;
 			const chunk = bufferChunk.subarray(0, bytesRead);
+			validationDecoder.decode(chunk, { stream: true });
 			endedWithNewline = chunk[bytesRead - 1] === 0x0a;
 
 			// Once collection and selected-line accounting are both finished, the
@@ -640,6 +641,11 @@ async function streamLinesFromFile(
 				pendingSegment = undefined;
 			}
 		}
+		if (reachedEof) validationDecoder.decode();
+	} catch (error) {
+		throw new ToolError(
+			`${filePath}: ${String(error)}. Text reads (including :raw) require valid ${encoding ?? "UTF-8"}. Configure this project's .omp/encoding.json with explicit include and encoding overrides; do not rewrite the source to recover a read.`,
+		);
 	} finally {
 		if (fileHandle) {
 			await fileHandle.close();
@@ -652,8 +658,13 @@ async function streamLinesFromFile(
 
 	let firstLinePreview: { text: string; bytes: number } | undefined;
 	if (firstLinePreviewBytes > 0) {
-		const { text, bytes } = truncateHeadBytes(Buffer.concat(firstLinePreviewChunks, firstLinePreviewBytes), maxBytes);
-		firstLinePreview = { text, bytes };
+		// Prefix may end mid-character: a streaming decoder holds that suffix
+		// instead of manufacturing U+FFFD. The scanned bytes were validated above.
+		const text = new TextDecoder(encoding ?? "utf-8", { fatal: true }).decode(
+			Buffer.concat(firstLinePreviewChunks, firstLinePreviewBytes),
+			{ stream: true },
+		);
+		firstLinePreview = { text, bytes: Buffer.byteLength(text, "utf8") };
 	}
 
 	return {
@@ -1785,9 +1796,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} catch {
 			return "";
 		}
-		if (!discovered) return "";
+		if (!discovered)
+			return "No encoding policy was found. If this is GBK text, explicitly configure .omp/encoding.json in its project with include rules and encoding gbk, then re-read. Do not use :raw or a shell rewrite to bypass decoding.";
 		const relative = path.relative(discovered.root, absolutePath).split(path.sep).join("/");
-		return `The project encoding policy at ${discovered.root}/.omp/encoding.json does not cover this path. If the file is GBK, add an include rule covering '${relative}' (or an override), then re-read it with the read tool. Do not rewrite the file through shell or scripting languages.`;
+		if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative))
+			return "This path is outside the current project's encoding policy. Open its own project context and explicitly configure that project's .omp/encoding.json. Do not expand this project's rules or rewrite the file to bypass decoding.";
+		return `The project encoding policy at ${discovered.root}/.omp/encoding.json does not cover this path. If the file is GBK, add an include rule covering '${relative}' and a matching encoding override when needed, then re-read it with the read tool. Do not rewrite the file through shell or scripting languages.`;
 	}
 
 	async #readFilesystemPath(
@@ -2132,8 +2146,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Encoding policy: a GBK-managed file decodes through the strict codec
 			// (same decode as the edit engine) instead of UTF-8. A UTF-8 BOM under
 			// a GBK rule is a policy conflict reported before any decoding.
-			const fileEncoding =
-				located || isRawSelector(parsed) ? undefined : resolveFileEncoding(this.session.cwd, absolutePath, true);
+			const fileEncoding = located ? undefined : resolveFileEncoding(this.session.cwd, absolutePath, true);
 			const managedGbk = fileEncoding === "gbk";
 			if (managedGbk) {
 				const bom = wholeFileBytes
@@ -2149,8 +2162,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// (font, object, archive, packed blob) decodes to NUL/control bytes and
 			// U+FFFD mojibake that corrupts the terminal and burns context. Images,
 			// notebooks, and markit-convertible documents were already routed above;
-			// everything reaching here is meant to be plain text. `:raw` stays the
-			// explicit escape hatch for reading bytes verbatim. This single guard
+			// everything reaching here is meant to be plain text. `:raw` bypasses
+			// the format sniff but still requires strict text decoding. This guard
 			// covers both the multi-range and single-range disk paths below.
 			const looksBinary =
 				!isRawSelector(parsed) &&
@@ -2189,14 +2202,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					.done();
 			}
 			// Decode only what survived the sniff.
-			const buffered = wholeFileBytes
-				? deriveBufferedFileText(wholeFileBytes, managedGbk ? "gbk" : undefined)
-				: undefined;
+			let buffered: BufferedFileText | undefined;
+			try {
+				buffered = wholeFileBytes
+					? deriveBufferedFileText(wholeFileBytes, managedGbk ? "gbk" : undefined)
+					: undefined;
+			} catch (error) {
+				throw new ToolError(
+					`${resolvedDisplayPath}: ${String(error)}. ${managedGbk ? "Check the GBK policy; use an explicit utf8 override if this file is UTF-8." : this.encodingPolicyGapHint(absolutePath)}`,
+				);
+			}
 			if (buffered) onBufferedFile?.(buffered.bytes);
 
 			// Unbounded schemes (instruction documents) read whole: no summary, no result limits.
 			if (located?.spec.unbounded) {
-				const text = buffered?.strippedText ?? (await Bun.file(absolutePath).text());
+				const text =
+					buffered?.strippedText ??
+					decodeStrict(await Bun.file(absolutePath).bytes(), managedGbk ? "gbk" : "utf8");
 				return buildInMemorySelectorResult(this.session, text, parsed, {
 					details: { resolvedPath: renderAbsolutePath },
 					sourcePath: renderAbsolutePath,

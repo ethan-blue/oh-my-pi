@@ -1274,6 +1274,15 @@ fn ast_edit_blocking(
 		// Validate every GBK output before the first write: an unrepresentable
 		// character refuses the whole batch instead of half-landing on disk.
 		for write in &pending_writes {
+			pi_edit::encoding::validate_source_encoding(
+				&write.absolute_path,
+				&write.output,
+				encoding
+					.as_ref()
+					.and_then(|policy| policy.resolve(&write.absolute_path, true))
+					.unwrap_or(pi_edit::encoding::TextEncoding::Utf8),
+			)
+			.map_err(Error::from_reason)?;
 			if encoding.as_ref().is_some_and(|policy| {
 				policy.resolve(&write.absolute_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
 			}) && let Err((offset, ch)) =

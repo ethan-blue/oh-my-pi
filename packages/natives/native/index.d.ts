@@ -1784,6 +1784,9 @@ export interface EncodingPolicyOptions {
   json: string
 }
 
+/** Reject Python coding declarations incompatible with the write encoding. */
+export declare function encodingValidateSource(path: string, text: string, encoding: string): void
+
 /**
  * Replace the current process image via `execvp(3)`.
  *
@@ -2052,7 +2055,7 @@ export interface GrepOptions {
   maxCountPerFile?: number
   /**
    * Project encoding policy (`.omp/encoding.json`): GBK-managed files are
-   * transcoded to UTF-8 (lossily, search-only) before matching, so Chinese
+   * strictly transcoded to UTF-8 before matching, so Chinese
    * patterns match and result lines render correctly.
    */
   encodingPolicy?: EncodingPolicyOptions

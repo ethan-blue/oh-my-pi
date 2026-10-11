@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -33,8 +34,10 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { runExtensionSetModel } from "../src/extensibility/extensions/compact-handler";
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -113,6 +116,128 @@ describe("ExtensionRunner", () => {
 
 		expect(runner.cwd).toBe(dirB);
 		expect(runner.createContext().cwd).toBe(dirB);
+	});
+
+	it("keeps model getters live after awaiting a switch within event and command handlers", async () => {
+		const initial = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const next = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!initial || !next) throw new Error("Missing bundled test models");
+		let active = initial;
+		await Bun.write(
+			path.join(extensionsDir, "live-model.ts"),
+			`export default pi => {
+			const switchAndRestore = async (_event, ctx) => {
+				const previous = ctx.model;
+				if (!await pi.setModel("${next.provider}/${next.id}")) throw new Error("Switch failed");
+				if (ctx.model.id !== "${next.id}" || ctx.models.current().id !== "${next.id}") throw new Error("Stale model after switch");
+				if (!await pi.setModel(previous)) throw new Error("Restore failed");
+				if (ctx.model !== previous || ctx.models.current() !== previous) throw new Error("Stale model after restore");
+			};
+			pi.on("session_start", switchAndRestore);
+			pi.registerCommand("switch-test", { handler: switchAndRestore });
+		};`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const available = vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([initial, next]);
+		const credentials = vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const changes: string[] = [];
+		const errors: ExtensionError[] = [];
+		runner.onError(error => errors.push(error));
+		try {
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: input =>
+						runExtensionSetModel(
+							{
+								modelRegistry,
+								setModel: async model => {
+									active = model;
+									changes.push(model.id);
+								},
+							},
+							input,
+						),
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => active,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+			await runner.emit({ type: "session_start" });
+			expect(errors).toEqual([]);
+			const command = runner.getCommand("switch-test");
+			if (!command) throw new Error("Missing model-switch test command");
+			await command.handler("", runner.createCommandContext());
+			expect(changes).toEqual([next.id, initial.id, next.id, initial.id]);
+		} finally {
+			available.mockRestore();
+			credentials.mockRestore();
+		}
+	});
+
+	it("custom command contexts retain session controls and follow an awaited model switch without a runner", async () => {
+		const initial = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const next = getBundledModel("openai", "gpt-4o-mini");
+		if (!initial || !next) throw new Error("Missing bundled test models");
+		const credential = vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
+		const metadata = vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => model);
+		const observed: string[] = [];
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model: initial, tools: [], messages: [], systemPrompt: [] } }),
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			customCommands: [
+				{
+					path: tempDir.join("context-command.ts"),
+					resolvedPath: tempDir.join("context-command.ts"),
+					source: "user",
+					command: {
+						name: "live-context",
+						description: "Exercise the command context after a model switch",
+						execute: async (_args, ctx) => {
+							observed.push(ctx.model?.id ?? "missing", ctx.cwd);
+							expect(ctx.hasQueuedMessages()).toBe(false);
+							await session.setModel(next);
+							observed.push(ctx.model?.id ?? "missing");
+						},
+					},
+				},
+			],
+		});
+		try {
+			await session.prompt("/live-context");
+			expect(observed).toEqual([initial.id, tempDir.path(), next.id]);
+		} finally {
+			await session.dispose();
+			credential.mockRestore();
+			metadata.mockRestore();
+		}
 	});
 
 	it("exposes the initialized host mode to extension contexts", async () => {

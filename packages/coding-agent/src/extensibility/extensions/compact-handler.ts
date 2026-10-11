@@ -6,6 +6,10 @@
  * union so the same adapter can be reused by print-mode, rpc-mode, and the executor.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
+import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
+import { createExtensionModelQuery } from "./model-api";
 import type { CompactOptions } from "./types";
 
 interface CompactableSession {
@@ -23,7 +27,8 @@ export async function runExtensionCompact(
 }
 
 interface SetModelCapableSession {
-	modelRegistry: { getApiKey(model: Model): Promise<string | undefined> };
+	modelRegistry: ModelRegistry;
+	settings?: Settings;
 	setModel(model: Model): Promise<unknown>;
 }
 
@@ -32,9 +37,33 @@ interface SetModelCapableSession {
  *
  * Returns false when no API key is available for the requested model.
  */
-export async function runExtensionSetModel(session: SetModelCapableSession, model: Model): Promise<boolean> {
+export async function runExtensionSetModel(session: SetModelCapableSession, input: Model | string): Promise<boolean> {
+	if (typeof input === "string" && !input.trim()) {
+		logger.warn("Extension setModel rejected an empty selector");
+		return false;
+	}
+	const model =
+		typeof input === "string"
+			? createExtensionModelQuery(session.modelRegistry, session.settings, () => undefined).resolve(input)
+			: input;
+	if (
+		!model ||
+		typeof model !== "object" ||
+		typeof model.id !== "string" ||
+		!model.id.trim() ||
+		typeof model.provider !== "string" ||
+		!model.provider.trim() ||
+		typeof model.api !== "string" ||
+		!model.api.trim()
+	) {
+		logger.warn("Extension setModel rejected an invalid or unresolved model");
+		return false;
+	}
 	const key = await session.modelRegistry.getApiKey(model);
-	if (!key) return false;
+	if (!key) {
+		logger.warn("Extension setModel rejected a model without available credentials");
+		return false;
+	}
 	await session.setModel(model);
 	return true;
 }

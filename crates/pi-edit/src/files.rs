@@ -21,7 +21,10 @@ use std::{
 };
 
 use crate::{
-	encoding::{TextEncoding, UTF8_BOM, decode_strict, encode_strict, line_endings_unrestorable},
+	encoding::{
+		TextEncoding, UTF8_BOM, decode_strict, encode_strict, line_endings_unrestorable,
+		validate_source_encoding,
+	},
 	engine::{FileOp, Resolved},
 	error::{EditError, EditResult},
 	notebook,
@@ -63,6 +66,8 @@ impl FileRead {
 	/// is issued) and refuse when their original line endings cannot be
 	/// restored exactly or their original bytes are not round-trip stable.
 	pub fn persist(&self, after_lf: &str) -> EditResult<String> {
+		validate_source_encoding(&self.resolved.absolute, after_lf, self.encoding)
+			.map_err(EditError::apply)?;
 		if self.is_notebook {
 			return notebook::serialize_edited_notebook_text(
 				Some(&self.raw),
@@ -127,6 +132,14 @@ fn persist_gbk_guard(
 /// The encoding comes from the policy's new-file rule (override match, else
 /// `newFileEncoding`); GBK output is strictly validated before the write.
 pub fn persist_new(policy: &PathPolicy, resolved: &Resolved, after_lf: &str) -> EditResult<String> {
+	validate_source_encoding(
+		&resolved.absolute,
+		after_lf,
+		policy
+			.resolve_encoding(&resolved.absolute, false)
+			.unwrap_or(TextEncoding::Utf8),
+	)
+	.map_err(EditError::apply)?;
 	if notebook::is_notebook_path(&resolved.absolute) {
 		return notebook::serialize_edited_notebook_text(None, after_lf, &resolved.display)
 			.map_err(|err| EditError::apply(err.to_string()));

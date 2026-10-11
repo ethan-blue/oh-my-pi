@@ -10,6 +10,7 @@
 use std::{
 	borrow::Cow,
 	collections::HashSet,
+	io::Read,
 	path::{Path, PathBuf},
 };
 
@@ -69,6 +70,59 @@ pub fn decode_strict(bytes: &[u8], encoding: TextEncoding) -> Result<String, usi
 	}
 }
 
+/// Strictly validate a bounded search window.
+///
+/// A truncated window uses the
+/// decoder's nonfinal state so a trailing partial character is withheld rather
+/// than replaced or mistaken for an invalid complete file. Unread tails are
+/// intentionally outside this validation contract.
+pub fn read_validated_prefix(
+	reader: impl std::io::Read,
+	limit: usize,
+	encoding: TextEncoding,
+) -> std::io::Result<Vec<u8>> {
+	let codec = match encoding {
+		TextEncoding::Utf8 => encoding_rs::UTF_8,
+		TextEncoding::Gbk => encoding_rs::GBK,
+	};
+	let mut decoder = codec.new_decoder_without_bom_handling();
+	let mut prefix = Vec::with_capacity(limit);
+	reader
+		.take(limit.saturating_add(1) as u64)
+		.read_to_end(&mut prefix)?;
+	let truncated = prefix.len() > limit;
+	prefix.truncate(limit);
+	let mut output = vec![0u8; 64 * 1024];
+	let mut consumed = 0usize;
+	loop {
+		let (result, read, _) =
+			decoder.decode_to_utf8_without_replacement(&prefix[consumed..], &mut output, !truncated);
+		consumed += read;
+		match result {
+			encoding_rs::DecoderResult::InputEmpty => break,
+			encoding_rs::DecoderResult::OutputFull => {},
+			encoding_rs::DecoderResult::Malformed(length, after) => {
+				let label = match encoding {
+					TextEncoding::Utf8 => "UTF-8",
+					TextEncoding::Gbk => "GBK",
+				};
+				return Err(std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!(
+						"invalid {label} byte sequence at offset {}",
+						consumed - usize::from(length) - usize::from(after),
+					),
+				));
+			},
+		}
+	}
+	if let Err(boundary) = decode_strict(&prefix, encoding) {
+		// Nonfinal validation passed: withhold the incomplete window suffix.
+		prefix.truncate(boundary);
+	}
+	Ok(prefix)
+}
+
 /// Strictly encode `text` with `encoding`; `Err` carries the byte index and
 /// the first character GBK cannot represent. The result always re-decodes to
 /// `text` (verified before returning).
@@ -77,6 +131,65 @@ pub fn encode_strict(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, (usi
 		TextEncoding::Utf8 => Ok(text.as_bytes().to_vec()),
 		TextEncoding::Gbk => gbk_encode_strict(text),
 	}
+}
+
+/// Check a Python source declaration before persistence. The cookie is a
+/// constraint, never permission to change the configured encoding. Python 3
+/// defaults to UTF-8 when no cookie is present.
+pub fn validate_source_encoding(
+	path: &Path,
+	text: &str,
+	encoding: TextEncoding,
+) -> Result<(), String> {
+	if !path
+		.extension()
+		.is_some_and(|ext| ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw"))
+	{
+		return Ok(());
+	}
+	if text.starts_with('\u{feff}') && encoding != TextEncoding::Utf8 {
+		return Err(format!("{}: Python UTF-8 BOM conflicts with target {encoding}", path.display()));
+	}
+	static COOKIE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+		regex::Regex::new(r"^[\t \x0c]*#.*?coding[:=][\t ]*([-_.a-zA-Z0-9]+)").unwrap()
+	});
+	let mut declared = None;
+	for line in text.trim_start_matches('\u{feff}').lines().take(2) {
+		if let Some(captures) = COOKIE.captures(line) {
+			declared = Some(captures[1].to_owned());
+			break;
+		}
+		// A second-line declaration only counts after a comment or blank line.
+		if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+			break;
+		}
+	}
+	let name = declared
+		.as_deref()
+		.unwrap_or("utf-8")
+		.to_ascii_lowercase()
+		.replace('_', "-");
+	if text.starts_with('\u{feff}') && !matches!(name.as_str(), "utf8" | "utf-8") {
+		return Err(format!(
+			"{}: Python UTF-8 BOM conflicts with coding declaration '{name}'",
+			path.display()
+		));
+	}
+	let compatible = match name.as_str() {
+		"utf8" | "utf-8" | "utf-8-sig" => encoding == TextEncoding::Utf8,
+		"gbk" | "cp936" | "ms936" => encoding == TextEncoding::Gbk,
+		"ascii" | "us-ascii" => text.is_ascii(),
+		_ => false,
+	};
+	if compatible {
+		return Ok(());
+	}
+	Err(format!(
+		"{}: Python source encoding '{name}' conflicts with target {encoding}; update the coding \
+		 declaration or add an explicit include and encoding override in .omp/encoding.json before \
+		 writing",
+		path.display()
+	))
 }
 
 /// Decode GBK bytes or fail with the first invalid byte offset.
@@ -282,6 +395,13 @@ impl CompiledEncodingPolicy {
 		if new_file_encoding.is_none() {
 			return Err(PolicyError("newFileEncoding is required".into()));
 		}
+		if !include.is_empty() && new_file_encoding != default_encoding {
+			return Err(PolicyError(
+				"newFileEncoding must equal defaultEncoding within include scope so new files remain \
+				 readable; use matching path overrides for encoding exceptions"
+					.into(),
+			));
+		}
 		Ok(Self { root, include, overrides, default_encoding, new_file_encoding, enabled: true })
 	}
 
@@ -294,9 +414,9 @@ impl CompiledEncodingPolicy {
 	///
 	/// `None` keeps upstream behavior (the file is not managed). Outside the
 	/// policy root the answer is always `None` — a home-directory policy never
-	/// leaks into nested projects. New files take the first matching override,
-	/// else `newFileEncoding`; existing files are managed only when an include
-	/// glob matches, then take the first matching override, else the default.
+	/// leaks into nested projects. Both new and existing files must match an
+	/// include glob. Within that scope the first override wins; otherwise new
+	/// files use `newFileEncoding` and existing files use the default.
 	pub fn resolve(&self, path: &Path, exists: bool) -> Option<TextEncoding> {
 		if !self.enabled {
 			return None;
@@ -308,14 +428,6 @@ impl CompiledEncodingPolicy {
 		let root = strip_verbatim(&self.root);
 		let relative = path.strip_prefix(root.as_ref()).ok()?;
 		let relative = to_forward_slashes(relative);
-		if !exists {
-			return self
-				.overrides
-				.iter()
-				.find(|(glob, _)| glob.is_match(relative.as_ref()))
-				.map(|(_, encoding)| *encoding)
-				.or(self.new_file_encoding);
-		}
 		if !self
 			.include
 			.iter()
@@ -328,7 +440,11 @@ impl CompiledEncodingPolicy {
 			.iter()
 			.find(|(glob, _)| glob.is_match(relative.as_ref()))
 			.map(|(_, encoding)| *encoding)
-			.or(self.default_encoding)
+			.or(if exists {
+				self.default_encoding
+			} else {
+				self.new_file_encoding
+			})
 	}
 }
 
@@ -516,6 +632,10 @@ mod tests {
 		let policy = compiled(POLICY);
 		assert_eq!(policy.resolve(Path::new("/proj/README.md"), true), None);
 		assert_eq!(policy.resolve(Path::new("/proj/src/script.py"), true), None);
+		assert_eq!(policy.resolve(Path::new("/proj/src/script.py"), false), None);
+		// An override refines the include scope; it does not expand it.
+		assert_eq!(policy.resolve(Path::new("/proj/src/vendor-utf8/gen.ts"), false), None);
+		assert_eq!(policy.resolve(Path::new("/proj/src/vendor-utf8/gen.ts"), true), None);
 		// Outside the root entirely.
 		assert_eq!(policy.resolve(Path::new("/other/src/main.c"), true), None);
 	}
@@ -533,7 +653,7 @@ mod tests {
 	fn policy_new_files_take_path_override_first() {
 		let policy = compiled(POLICY);
 		assert_eq!(
-			policy.resolve(Path::new("/proj/src/vendor-utf8/gen.ts"), false),
+			policy.resolve(Path::new("/proj/src/vendor-utf8/gen.c"), false),
 			Some(TextEncoding::Utf8)
 		);
 	}
@@ -580,5 +700,78 @@ mod tests {
 	#[test]
 	fn bom_conflict_bytes_are_recognized() {
 		assert_eq!(&UTF8_BOM[..], "\u{FEFF}".as_bytes());
+	}
+
+	#[test]
+	fn python_declarations_cannot_disagree_with_persisted_bytes() {
+		let path = Path::new("/proj/check.py");
+		for text in [
+			"# coding: utf-8\n# 中文",
+			"# 中文",
+			"\u{feff}# coding: gbk\n# 中文",
+			"# coding: unknown\n",
+		] {
+			assert!(validate_source_encoding(path, text, TextEncoding::Gbk).is_err());
+		}
+		assert!(
+			validate_source_encoding(
+				path,
+				"#!/usr/bin/python\n# coding=cp936\n# 中文",
+				TextEncoding::Gbk
+			)
+			.is_ok()
+		);
+		assert!(validate_source_encoding(path, "# coding: gbk\n# 中文", TextEncoding::Utf8).is_err());
+		assert!(
+			validate_source_encoding(path, "\u{feff}# coding: gbk\n# 中文", TextEncoding::Utf8)
+				.is_err()
+		);
+		assert!(
+			validate_source_encoding(path, "\u{feff}# coding: ascii\n", TextEncoding::Utf8).is_err()
+		);
+		assert!(
+			validate_source_encoding(path, "\u{feff}# coding: utf-8\n# 中文", TextEncoding::Utf8)
+				.is_ok()
+		);
+		assert!(validate_source_encoding(path, "x = 1\n# coding: gbk\n", TextEncoding::Gbk).is_err());
+	}
+
+	#[test]
+	fn inconsistent_new_and_existing_encodings_are_rejected() {
+		let spec = spec_json(
+			r#"{"schemaVersion":1,"enabled":true,"include":["**"],"defaultEncoding":"gbk","newFileEncoding":"utf8"}"#,
+		);
+		assert!(CompiledEncodingPolicy::compile(PathBuf::from("/proj"), &spec).is_err());
+	}
+
+	#[test]
+	fn bounded_search_prefix_withholds_incomplete_characters_without_validating_unread_tail() {
+		for (bytes, encoding) in [
+			(&b"a\xe4\xb8\xad\xff"[..], TextEncoding::Utf8),
+			(&b"a\xd6\xd0\xff"[..], TextEncoding::Gbk),
+		] {
+			assert_eq!(read_validated_prefix(bytes, 2, encoding).unwrap(), b"a");
+			assert!(read_validated_prefix(bytes, 8, encoding).is_err());
+		}
+		assert!(read_validated_prefix(&b"a\xe4"[..], 2, TextEncoding::Utf8).is_err());
+		assert!(read_validated_prefix(&b"a\xd6"[..], 2, TextEncoding::Gbk).is_err());
+	}
+
+	#[test]
+	fn disabled_and_outside_root_new_files_remain_unmanaged() {
+		let policy = compiled(POLICY);
+		assert_eq!(policy.resolve(Path::new("/other/src/main.c"), false), None);
+		let disabled = compiled(
+			r#"{"schemaVersion":1,"enabled":false,"include":["**"],"defaultEncoding":"gbk","newFileEncoding":"utf8"}"#,
+		);
+		assert_eq!(disabled.resolve(Path::new("/proj/main.c"), false), None);
+		assert_eq!(disabled.resolve(Path::new("/proj/main.c"), true), None);
+	}
+
+	#[test]
+	fn explicitly_selected_gbk_does_not_guess_valid_utf8_bytes() {
+		let bytes = "中文".as_bytes();
+		assert_eq!(decode_strict(bytes, TextEncoding::Utf8).unwrap(), "中文");
+		assert_ne!(decode_strict(bytes, TextEncoding::Gbk).unwrap(), "中文");
 	}
 }

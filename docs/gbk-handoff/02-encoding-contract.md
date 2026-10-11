@@ -1,5 +1,7 @@
 # 02 — 编码与文件完整性契约
 
+> 2026-10-10 修订：下文保留初期设计背景；当前发布后改进以 [14-issue-remediation-design.md](14-issue-remediation-design.md) 为准。新文件也必须命中 include；override 只细化覆盖范围，不能独立扩大范围。未覆盖的文本按严格 UTF-8 处理，不输出解码替换内容。启用且覆盖非空的策略必须令 newFileEncoding 与 defaultEncoding 一致，混合目录通过 include 内的 override 表达。Python 源码声明与目标编码冲突时写前拒绝。实现及测试状态另见本轮验收记录，不能用设计文档代替验收。
+
 ## 1. 单一策略、两层接入
 
 建议由 Rust 维护严格 codec 和字节语义，通过现有 N-API 提供给 TS。TS 负责项目策略、错误显示和工具集成，Rust 编辑/搜索路径直接复用同一语义。最终模块放置由 P02 决定；不得为了追求“一个函数”制造 Rust↔JS 每行往返。

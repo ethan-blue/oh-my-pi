@@ -1617,8 +1617,8 @@ export interface ExtensionAPI {
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 
-	/** Set the current model. Returns false if no API key available. */
-	setModel(model: Model): Promise<boolean>;
+	/** Set a Model or resolve a selector/role. Returns false with a diagnostic for invalid/unresolved input or missing credentials. */
+	setModel(model: Model | string): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel | undefined;
@@ -1849,7 +1849,7 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
-export type SetModelHandler = (model: Model) => Promise<boolean>;
+export type SetModelHandler = (model: Model | string) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 

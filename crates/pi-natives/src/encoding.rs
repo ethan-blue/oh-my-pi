@@ -45,14 +45,36 @@ pub(crate) fn compile_policy_options(
 	}
 }
 
-/// Lossy GBK→UTF-8 transcode for search-only views: invalid sequences become
-/// U+FFFD so matching continues (grep never writes, so the strict read/write
-/// contract does not apply here; edits go through the strict path instead).
-pub(crate) fn transcode_gbk_lossy(buffer: &mut Vec<u8>) {
-	let (text, _) = encoding_rs::GBK.decode_without_bom_handling(buffer.as_slice());
-	let bytes = text.into_owned().into_bytes();
-	buffer.clear();
-	buffer.extend_from_slice(&bytes);
+/// Validate search input before matching in every output mode. A failed
+/// decode is an error, never a successful zero-match result or lossy context.
+pub(crate) fn transcode_search_strict(
+	buffer: &mut Vec<u8>,
+	path: &std::path::Path,
+	policy: Option<&CompiledEncodingPolicy>,
+) -> Result<()> {
+	let encoding = policy
+		.and_then(|p| p.resolve(path, true))
+		.unwrap_or(TextEncoding::Utf8);
+	if encoding == TextEncoding::Gbk && buffer.starts_with(&pi_edit::encoding::UTF8_BOM) {
+		return Err(reason(format!(
+			"{}: UTF-8 BOM conflicts with GBK policy; add an explicit utf8 override in \
+			 .omp/encoding.json",
+			path.display()
+		)));
+	}
+	let text = decode_strict(buffer, encoding).map_err(|offset| {
+		reason(format!(
+			"{}: invalid {} byte sequence at offset {offset}; search aborted without decoding \
+			 substitutions. Check this project's .omp/encoding.json include rules and explicit \
+			 encoding overrides; outside-root files require their own project context",
+			path.display(),
+			encoding_label(encoding)
+		))
+	})?;
+	if encoding == TextEncoding::Gbk {
+		*buffer = text.into_bytes();
+	}
+	Ok(())
 }
 
 /// A compiled `.omp/encoding.json` bound to one project root. Cheap to
@@ -131,4 +153,12 @@ pub fn encoding_encode_strict(text: String, encoding: String) -> Result<Uint8Arr
 pub fn encoding_can_encode(text: String, encoding: String) -> Result<bool> {
 	let encoding = TextEncoding::parse(&encoding).map_err(reason)?;
 	Ok(encode_strict(&text, encoding).is_ok())
+}
+
+/// Reject Python coding declarations incompatible with the write encoding.
+#[napi]
+pub fn encoding_validate_source(path: String, text: String, encoding: String) -> Result<()> {
+	let encoding = TextEncoding::parse(&encoding).map_err(reason)?;
+	pi_edit::encoding::validate_source_encoding(std::path::Path::new(&path), &text, encoding)
+		.map_err(reason)
 }

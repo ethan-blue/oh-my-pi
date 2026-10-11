@@ -7982,6 +7982,7 @@ export class AgentSession implements SettingsScope {
 			return this.#extensionRunner.createCommandContext();
 		}
 
+		const getModel = () => this.model ?? undefined;
 		return {
 			ui: noOpUIContext,
 			mode: "print",
@@ -7994,8 +7995,10 @@ export class AgentSession implements SettingsScope {
 			// one (carrying the real identity), so only hand-constructed sessions land here.
 			agent: TOP_LEVEL_AGENT,
 
-			model: this.model ?? undefined,
-			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			get model() {
+				return getModel();
+			},
+			models: createExtensionModelQuery(this.#modelRegistry, this.settings, getModel),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();
@@ -8078,10 +8081,8 @@ export class AgentSession implements SettingsScope {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
-			...baseCtx,
-			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as CustomCommandContext;
+		const ctx: CustomCommandContext = Object.create(baseCtx);
+		ctx.hasQueuedMessages = baseCtx.hasPendingMessages;
 
 		try {
 			const args = parseCommandArgs(argsString);

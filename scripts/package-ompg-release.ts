@@ -31,7 +31,7 @@ function argValue(name: string): string | undefined {
 
 const root = import.meta.dir.replace(/[/\\]scripts$/, "");
 const version = argValue("version") ?? `${upstreamVersion}-gbk.1`;
-if (!/^[A-Za-z0-9][A-Za-z0-9.\-]*$/.test(version)) throw new Error("Invalid release version");
+if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(version)) throw new Error("Invalid release version");
 const staging = path.join(root, "release-staging", version);
 const sha = argValue("sha") ?? (await $`git rev-parse HEAD`.cwd(root).quiet().text()).trim();
 const dirty = (await $`git status --porcelain`.cwd(root).quiet().text()).trim();

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Applied encoding include rules to new files and rejected Python source encoding conflicts before editing ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
+- Rejected invalid UTF-8 or GBK search input instead of returning replacement-character matches ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

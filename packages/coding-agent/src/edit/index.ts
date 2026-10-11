@@ -26,7 +26,7 @@ import {
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
-import { discoverEncodingPolicy, encodeStrict } from "../encoding/index";
+import { assertSourceEncoding, discoverEncodingPolicy, encodeStrict } from "../encoding/index";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
@@ -670,6 +670,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (request.content === undefined) {
 			throw new ToolError(`Native edit ${request.op} request omitted content`, { path: request.path });
 		}
+		assertSourceEncoding(request.moveTo ?? request.path, request.content, gbk ? "gbk" : "utf8");
 
 		if (request.op === "move") {
 			if (!request.moveTo) {

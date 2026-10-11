@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Reported ompg runtime identity and resolved data locations to agents, including custom prompt modes ([#1](https://github.com/ethan-blue/oh-my-pi/issues/1)).
+- Accepted model selectors in extension `setModel` and diagnosed invalid selections or missing credentials ([#2](https://github.com/ethan-blue/oh-my-pi/issues/2)).
+- Kept new-file encoding within include rules and rejected conflicting Python source declarations before writing; text reads and searches now reject invalid encoded input ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 - Fixed ompg Windows installation, isolated version upgrades and rollback; uninstall now preserves unmanaged files.
 - Fixed protected-mode cwd escapes and configuration edits; configured builds now execute checked arguments directly without shell startup.
 - Fixed GBK LSP create/rename edits and rejected byte-normalizing writes before changing files.

@@ -8,7 +8,21 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
-import { $env, getAgentDir, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	APP_NAME,
+	DISTRIBUTION_VERSION,
+	getAgentDir,
+	getConfigRootDir,
+	getAgentDbPath,
+	getHistoryDbPath,
+	getSessionsDir,
+	getProjectDir,
+	hasFsCode,
+	isEnoent,
+	logger,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -28,6 +42,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import runtimeIdentityTemplate from "./prompts/system/runtime-identity.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
@@ -522,6 +537,8 @@ export interface BuildSystemPromptOptions {
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
+	/** Actual session agent data directory, including SDK overrides. Default: getAgentDir() */
+	agentDir?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute. Injected into the project prompt. */
 	additionalWorkspaceRoots?: string[];
 	/** Pre-loaded context files (skips discovery if provided). */
@@ -1033,6 +1050,18 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rendered = prompt.render(systemPromptTemplate, data);
 	}
 	const systemPrompt = [rendered];
+	const identityAgentDir = path.resolve(options.agentDir ?? getAgentDir());
+	systemPrompt.push(
+		prompt.render(runtimeIdentityTemplate, {
+			appName: APP_NAME,
+			version: DISTRIBUTION_VERSION,
+			configRoot: path.resolve(getConfigRootDir()),
+			agentDir: identityAgentDir,
+			agentDb: path.resolve(getAgentDbPath(identityAgentDir)),
+			historyDb: path.resolve(getHistoryDbPath(identityAgentDir)),
+			sessionsDir: path.resolve(getSessionsDir(identityAgentDir)),
+		}),
+	);
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);

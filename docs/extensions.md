@@ -371,6 +371,10 @@ If you use raw `setInterval`/`setTimeout` or detached promises instead, you own 
 - `resolve(spec)` — a model string (`provider/id`, bare id) or role alias (`@slow`, a configured role) → `Model`, honoring the same settings-backed aliases and match preferences as `--model`. Returns `undefined` when nothing matches.
 - `family(model)` — an opaque lineage token for "same family?" checks (Claude point releases share a token; Claude and GPT differ). Compare it; don't persist it (the vocabulary tracks new releases).
 
+`await pi.setModel(modelOrSelector)` accepts a `Model` object, a model selector, or a role such as `@slow`. Selectors use the same resolver as `ctx.models.resolve`. Invalid/unresolved input or missing credentials returns `false` and emits a diagnostic without logging the input or credentials. Always check the result. Existing session errors still reject the promise.
+
+After a successful awaited switch, ordinary event/command contexts read the live session model through both `ctx.model` and `ctx.models.current()`; do not destructure `model` before switching and expect the copied value to update. Request-specific contexts (such as `before_provider_request`) intentionally expose that request's model, which can differ from the primary session model. There is no separate pending-model API, and a switch does not rewrite an already running provider request.
+
 ```ts
 // Pick a model from a different family than the current one (e.g. a cross-family reviewer).
 const current = ctx.models.current();

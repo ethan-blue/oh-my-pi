@@ -147,7 +147,7 @@ pub struct GrepOptions<'env> {
 	/// reached.
 	pub max_count_per_file: Option<u32>,
 	/// Project encoding policy (`.omp/encoding.json`): GBK-managed files are
-	/// transcoded to UTF-8 (lossily, search-only) before matching, so Chinese
+	/// strictly transcoded to UTF-8 before matching, so Chinese
 	/// patterns match and result lines render correctly.
 	pub encoding_policy:    Option<crate::encoding::EncodingPolicyOptions>,
 	/// Abort signal for cancelling the operation.
@@ -1376,10 +1376,15 @@ fn stream_file_entry(
 /// Read the first [`MAX_FILE_BYTES`] of a file into owned bytes for searching.
 ///
 /// Used by the deferred oversized pass: files larger than the cap are searched
-/// only over their leading window; the remainder is dropped. The bounded owned
-/// read avoids mmap page faults when the backing file is rewritten
-/// concurrently.
-fn read_file_prefix(fs: &BlockingFs, path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
+/// only over their leading window. Strict validation covers that bounded
+/// window; an incomplete trailing character is withheld and unread tails keep
+/// the upstream partial-search semantics.
+fn read_file_prefix(
+	fs: &BlockingFs,
+	path: &Path,
+	buffer: &mut Vec<u8>,
+	policy: Option<&pi_edit::encoding::CompiledEncodingPolicy>,
+) -> io::Result<ReadFile> {
 	let file = match fs.open(path) {
 		Ok(file) => file,
 		Err(err)
@@ -1398,8 +1403,25 @@ fn read_file_prefix(fs: &BlockingFs, path: &Path, buffer: &mut Vec<u8>) -> io::R
 		buffer.clear();
 		return Ok(ReadFile::Read);
 	}
-	let window = len.min(MAX_FILE_BYTES);
-	read_owned_prefix(file, window, window, buffer)?;
+	let encoding = policy
+		.and_then(|p| p.resolve(path, true))
+		.unwrap_or(pi_edit::encoding::TextEncoding::Utf8);
+	*buffer = pi_edit::encoding::read_validated_prefix(file, MAX_FILE_BYTES as usize, encoding)
+		.map_err(|err| {
+			if err.kind() == io::ErrorKind::InvalidData {
+				io::Error::new(
+					err.kind(),
+					format!(
+						"{}: {err}; search aborted without decoding substitutions. Check this project's \
+						 .omp/encoding.json include rules and explicit encoding overrides; outside-root \
+						 files require their own project context",
+						path.display()
+					),
+				)
+			} else {
+				err
+			}
+		})?;
 	Ok(ReadFile::Read)
 }
 
@@ -1420,15 +1442,17 @@ fn search_one_file<M: Matcher + Sync>(
 		ReadPolicy::Full => {
 			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
 		},
-		ReadPolicy::Prefix => read_file_prefix(fs, &file.path, &mut worker.buffer),
+		ReadPolicy::Prefix => {
+			read_file_prefix(fs, &file.path, &mut worker.buffer, encoding.map(AsRef::as_ref))
+		},
 	};
 	match read {
 		Ok(ReadFile::Read) => {
-			if let Some(policy) = encoding
-				&& policy.resolve(&file.path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
-			{
-				crate::encoding::transcode_gbk_lossy(&mut worker.buffer);
-			}
+			crate::encoding::transcode_search_strict(
+				&mut worker.buffer,
+				&file.path,
+				encoding.map(AsRef::as_ref),
+			)?;
 		},
 		Ok(ReadFile::Oversized) => return Ok(FileOutcome::Defer),
 		Ok(ReadFile::Skipped) => {
@@ -1436,6 +1460,9 @@ fn search_one_file<M: Matcher + Sync>(
 				ReadPolicy::Prefix => FileOutcome::SkippedOversized,
 				ReadPolicy::Full => FileOutcome::Skipped,
 			});
+		},
+		Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+			return Err(Error::from_reason(err.to_string()));
 		},
 		Err(_) => return Ok(FileOutcome::Skipped),
 	}
@@ -2202,18 +2229,23 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		let mut buffer = Vec::new();
 		match read_file_bytes(fs, &search_path, &mut buffer) {
 			Ok(ReadFile::Read) => {},
-			Ok(ReadFile::Oversized) => match read_file_prefix(fs, &search_path, &mut buffer) {
-				Ok(ReadFile::Read) => {},
-				_ => {
-					return Ok(GrepResult {
-						matches:            Vec::new(),
-						total_matches:      0,
-						files_with_matches: 0,
-						files_searched:     0,
-						limit_reached:      None,
-						skipped_oversized:  Some(1),
-					});
-				},
+			Ok(ReadFile::Oversized) => {
+				match read_file_prefix(fs, &search_path, &mut buffer, encoding.as_deref()) {
+					Ok(ReadFile::Read) => {},
+					Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+						return Err(Error::from_reason(err.to_string()));
+					},
+					_ => {
+						return Ok(GrepResult {
+							matches:            Vec::new(),
+							total_matches:      0,
+							files_with_matches: 0,
+							files_searched:     0,
+							limit_reached:      None,
+							skipped_oversized:  Some(1),
+						});
+					},
+				}
 			},
 			Ok(ReadFile::Skipped) | Err(_) => {
 				return Ok(GrepResult {
@@ -2226,11 +2258,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				});
 			},
 		}
-		if encoding.as_ref().is_some_and(|policy| {
-			policy.resolve(&search_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
-		}) {
-			crate::encoding::transcode_gbk_lossy(&mut buffer);
-		}
+		crate::encoding::transcode_search_strict(&mut buffer, &search_path, encoding.as_deref())?;
 		let bytes = &buffer;
 
 		if output_mode == OutputMode::FilesWithMatches && max_count.is_none() && offset == 0 {
@@ -3871,7 +3899,7 @@ mod tests {
 		fs::write(&path, vec![b'a'; oversized_len]).expect("write original oversized file");
 
 		let mut buffer = Vec::new();
-		let outcome = super::read_file_prefix(&BlockingFs::native(), &path, &mut buffer)
+		let outcome = super::read_file_prefix(&BlockingFs::native(), &path, &mut buffer, None)
 			.expect("read oversized prefix");
 		assert!(matches!(outcome, super::ReadFile::Read));
 		assert_eq!(buffer.len(), prefix_len);

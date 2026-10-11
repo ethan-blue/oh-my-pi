@@ -328,7 +328,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.getCommands();
 	}
 
-	setModel(model: Model): Promise<boolean> {
+	setModel(model: Model | string): Promise<boolean> {
 		return this.runtime.setModel(model);
 	}
 

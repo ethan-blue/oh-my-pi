@@ -144,7 +144,8 @@ describe("R10 protected mode and native recovery (A01–A10)", () => {
 
 	it("A02: after adding the confirmed rule, native read→edit succeeds (recovery loop)", async () => {
 		const file = path.join(tmpDir, "tests", "verify_static_layout.py");
-		const original = gbkBytes("# 校验静态布置\nx = 1\n");
+		// A Python 3 GBK source must also declare its charset to the interpreter.
+		const original = gbkBytes("# coding: gbk\n# 校验静态布置\nx = 1\n");
 		await Bun.write(file, Buffer.from(original));
 		// The user confirms the encoding: extend the rule to tests/*.py.
 		await fs.writeFile(
@@ -170,7 +171,7 @@ describe("R10 protected mode and native recovery (A01–A10)", () => {
 			new_string: "x = 2",
 		});
 		expect(outcome.isError).toBeFalsy();
-		expect(new Uint8Array(await fs.readFile(file))).toEqual(gbkBytes("# 校验静态布置\nx = 2\n"));
+		expect(new Uint8Array(await fs.readFile(file))).toEqual(gbkBytes("# coding: gbk\n# 校验静态布置\nx = 2\n"));
 	});
 
 	it("A03: mixed-encoding directory — each file follows its own rule", async () => {

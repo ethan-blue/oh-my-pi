@@ -130,7 +130,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
-import { assertStableGbkBytes, encodeStrict } from "../encoding/index";
+import { assertSourceEncoding, assertStableGbkBytes, encodeStrict } from "../encoding/index";
 import { assertProtectedConfigMutation } from "./protected-mode";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { resolveSyscallTarget } from "./path-utils";
@@ -424,6 +424,7 @@ export async function writeFileWithFallback(
 	encoding?: "gbk",
 ): Promise<void> {
 	assertProtectedConfigMutation(dst);
+	assertSourceEncoding(dst, content, encoding);
 	let payload: string | Uint8Array = content;
 	if (encoding === "gbk") {
 		try {

@@ -77,6 +77,7 @@ export const encodeSixelAsync = nativeBindings.encodeSixelAsync ?? missingNative
 export const encodingCanEncode = nativeBindings.encodingCanEncode ?? missingNativeExport("encodingCanEncode");
 export const encodingDecodeStrict = nativeBindings.encodingDecodeStrict ?? missingNativeExport("encodingDecodeStrict");
 export const encodingEncodeStrict = nativeBindings.encodingEncodeStrict ?? missingNativeExport("encodingEncodeStrict");
+export const encodingValidateSource = nativeBindings.encodingValidateSource ?? missingNativeExport("encodingValidateSource");
 export const execReplace = nativeBindings.execReplace ?? missingNativeExport("execReplace");
 export const executeShell = nativeBindings.executeShell ?? missingNativeExport("executeShell");
 export const expandWindowsLongPath = nativeBindings.expandWindowsLongPath ?? missingNativeExport("expandWindowsLongPath");

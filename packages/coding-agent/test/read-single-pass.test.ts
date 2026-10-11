@@ -74,29 +74,38 @@ describe("read tool single-pass file access", () => {
 		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFexport const a = 1;\nexport const b = 22;\n");
 	});
 
-	it("reports on-disk byte lengths for a line that is not valid UTF-8", async () => {
-		// Decoding replaces each stray byte with U+FFFD, which re-encodes to three
-		// bytes. Measuring the decoded string instead of the buffer would inflate
-		// every reported length by two bytes per stray byte.
+	it("rejects invalid UTF-8 beyond the sniff window without changing source bytes", async () => {
 		const strayBytes = 512;
 		const lineBytes = 60 * 1024;
 		const filePath = path.join(tmpDir, "invalid-utf8.txt");
-		await fs.writeFile(
-			filePath,
-			Buffer.concat([
-				// Stray bytes sit past the 8KiB binary sniff window, so the file still
-				// reads as text and reaches the oversized-line notice.
-				Buffer.from("z".repeat(lineBytes - strayBytes), "utf-8"),
-				Buffer.from(Array.from({ length: strayBytes }, () => 0xff)),
-				Buffer.from("\ntail\n", "utf-8"),
-			]),
+		const original = Buffer.concat([
+			// Stray bytes sit past the 8KiB binary sniff window, so the file still
+			// reads as text and reaches the oversized-line notice.
+			Buffer.from("z".repeat(lineBytes - strayBytes), "utf-8"),
+			Buffer.from(Array.from({ length: strayBytes }, () => 0xff)),
+			Buffer.from("\ntail\n", "utf-8"),
+		]);
+		await fs.writeFile(filePath, original);
+		await expect(new ReadTool(createSession(tmpDir)).execute("invalid", { path: `${filePath}:1-1` })).rejects.toThrow(
+			"UTF-8",
 		);
+		expect(await fs.readFile(filePath)).toEqual(original);
+	});
+
+	it("reports actual byte lengths for a valid multibyte UTF-8 line over the byte budget", async () => {
+		// The line is 20 KiB of UTF-16 code units but 60 KiB on disk. A reader
+		// counting string.length would miss the 50 KiB limit entirely.
+		const line = "中".repeat(20 * 1024);
+		const lineBytes = Buffer.byteLength(line, "utf8");
+		const filePath = path.join(tmpDir, "multibyte-utf8.txt");
+		await fs.writeFile(filePath, `${line}\ntail\n`, "utf8");
 
 		// `:1-1` keeps the byte budget at its 50KB floor, which the 60KB line exceeds.
 		const text = textOutput(await new ReadTool(createSession(tmpDir)).execute("bytes", { path: `${filePath}:1-1` }));
 
 		expect(text).toContain(`[Line 1 is ${formatBytes(lineBytes)}, exceeds ${formatBytes(50 * 1024)} limit`);
-		expect(text).not.toContain(formatBytes(lineBytes + strayBytes * 2));
+		expect(text).not.toContain(`[Line 1 is ${formatBytes(line.length)},`);
+		expect(text).not.toContain("\uFFFD");
 	});
 
 	it("counts the terminal newline as an addressable line only in raw mode", async () => {

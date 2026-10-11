@@ -113,6 +113,55 @@ describe("GBK LSP workspace edits and move failure", () => {
 		expect(await Bun.file(renamed).bytes()).toEqual(gbk("// 中文\nint a = 2;\n"));
 	});
 
+	it("a Python cookie conflict rejects every LSP edit before any file is changed", async () => {
+		const good = path.join(tmpDir, "src", "good.c");
+		const python = path.join(tmpDir, "src", "verify.py");
+		const original = gbk("# coding: gbk\n# 中文\n");
+		await Bun.write(good, "1");
+		await Bun.write(python, original);
+		await expect(
+			applyWorkspaceEdit(
+				{
+					changes: {
+						[fileToUri(good)]: [
+							{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "2" },
+						],
+						[fileToUri(python)]: [
+							{
+								range: { start: { line: 0, character: 10 }, end: { line: 0, character: 13 } },
+								newText: "utf-8",
+							},
+						],
+					},
+				},
+				tmpDir,
+			),
+		).rejects.toThrow("conflicts");
+		expect(await Bun.file(good).text()).toBe("1");
+		expect(await Bun.file(python).bytes()).toEqual(original);
+		const created = path.join(tmpDir, "src", "created.py");
+		await expect(
+			applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "create", uri: fileToUri(created) },
+						{
+							textDocument: { uri: fileToUri(created), version: null },
+							edits: [
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+									newText: "# coding: utf-8\n# 中文\n",
+								},
+							],
+						},
+					],
+				},
+				tmpDir,
+			),
+		).rejects.toThrow("conflicts");
+		expect(await Bun.file(created).exists()).toBe(false);
+	});
+
 	it("a noncanonical GBK byte sequence rejects the complete batch without normalizing it", async () => {
 		const good = path.join(tmpDir, "src", "good.c"),
 			ambiguous = path.join(tmpDir, "src", "ambiguous.c");

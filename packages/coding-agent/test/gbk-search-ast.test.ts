@@ -8,7 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { astEdit, astGrep, grep } from "@oh-my-pi/pi-natives";
+import { astEdit, astGrep, grep, GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AstEditTool } from "@oh-my-pi/pi-coding-agent/tools/ast-edit";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
@@ -112,15 +112,65 @@ describe("GBK search and AST", () => {
 		expect(result.matches[0]!.line).not.toContain("\uFFFD");
 	});
 
-	it("grep without the policy sees no match for the Chinese keyword (upstream behavior)", async () => {
+	it("grep without a policy reports invalid encoding instead of a false zero-match result", async () => {
 		await fs.writeFile(path.join(tmpDir, "src", "a.c"), gbk("// 中文注释\nint x = 1;\n"));
-		const result = await grep({
-			pattern: "中文",
-			path: path.join(tmpDir, "src"),
-			maxColumns: 200,
-		});
-		expect(result.totalMatches).toBe(0);
+		await expect(
+			grep({
+				pattern: "中文",
+				path: path.join(tmpDir, "src"),
+				maxColumns: 200,
+			}),
+		).rejects.toThrow("invalid UTF-8");
 	});
+
+	for (const mode of [GrepOutputMode.Content, GrepOutputMode.Count, GrepOutputMode.FilesWithMatches]) {
+		it(`grep ${mode} rejects uncovered invalid bytes for both a file and recursive search`, async () => {
+			const file = path.join(tmpDir, "notes.txt");
+			await Bun.write(file, gbk("// 中文\nint x;\n"));
+			for (const target of [file, tmpDir]) {
+				await expect(
+					grep({ path: target, pattern: "int", mode, context: 1, encodingPolicy: policyOption }),
+				).rejects.toThrow("invalid UTF-8");
+			}
+		});
+	}
+
+	it("grep rejects invalid managed GBK but preserves genuine UTF-8 replacement characters", async () => {
+		const broken = path.join(tmpDir, "src", "broken.c");
+		await Bun.write(broken, new Uint8Array([0xd6, 0x7f]));
+		await expect(grep({ path: broken, pattern: ".", encodingPolicy: policyOption })).rejects.toThrow("invalid GBK");
+		const valid = path.join(tmpDir, "valid.txt");
+		await Bun.write(valid, "literal \uFFFD\n");
+		const result = await grep({ path: valid, pattern: "literal" });
+		expect(result.matches[0]?.line).toBe("literal \uFFFD");
+	});
+
+	for (const encoding of ["utf8", "gbk"]) {
+		it(`oversized ${encoding} search withholds a character crossing the prefix boundary`, async () => {
+			const cap = 4 * 1024 * 1024;
+			const file = path.join(tmpDir, encoding === "gbk" ? "src/large.c" : "large.txt");
+			const bytes = Buffer.alloc(cap + 64, 0x61);
+			bytes.set(Buffer.from("needle\n"));
+			bytes.set(encoding === "gbk" ? [0xd6, 0xd0] : [0xe4, 0xb8, 0xad], cap - 1);
+			// This byte is outside the upstream searched window. It must not turn
+			// a bounded prefix search into an unbounded whole-file validation.
+			bytes[cap + 32] = 0xff;
+			await Bun.write(file, bytes);
+			for (const target of [file, tmpDir]) {
+				for (const mode of [GrepOutputMode.Content, GrepOutputMode.Count, GrepOutputMode.FilesWithMatches]) {
+					const result = await grep({ path: target, pattern: "needle", mode, encodingPolicy: policyOption });
+					expect(result.totalMatches).toBe(1);
+					expect(result.matches.some(match => match.line?.includes("\uFFFD"))).toBe(false);
+				}
+			}
+			bytes[cap - 8] = 0xff;
+			await Bun.write(file, bytes);
+			await expect(grep({ path: file, pattern: "needle", encodingPolicy: policyOption })).rejects.toThrow("invalid");
+			await expect(grep({ path: tmpDir, pattern: "needle", encodingPolicy: policyOption })).rejects.toThrow(
+				"invalid",
+			);
+		});
+	}
 
 	it("ast_grep finds a pattern near Chinese text with offsets into the decoded text (E19)", async () => {
 		await fs.writeFile(path.join(tmpDir, "src", "t.ts"), gbk("const 值 = 1;\nconst other = 值 + 2;\n"));
@@ -174,5 +224,21 @@ describe("GBK search and AST", () => {
 		}
 		expect(message).toContain("GBK");
 		expect(new Uint8Array(await fs.readFile(file))).toEqual(original);
+	});
+
+	it("ast_edit refuses Python declaration conflicts before applying replacements", async () => {
+		const file = path.join(tmpDir, "src", "invalid.py");
+		const original = gbk("# coding: utf-8\n# 中文\nx = 1\n");
+		await Bun.write(file, original);
+		await expect(
+			astEdit({
+				rewrites: { "x = 1": "x = 2" },
+				path: file,
+				lang: "python",
+				dryRun: false,
+				encodingPolicy: policyOption,
+			}),
+		).rejects.toThrow("conflicts");
+		expect(await Bun.file(file).bytes()).toEqual(original);
 	});
 });

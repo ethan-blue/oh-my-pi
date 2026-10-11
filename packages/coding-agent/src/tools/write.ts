@@ -38,7 +38,7 @@ import type { ToolSession } from "../sdk";
 import { hasActiveWriteBridge, routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
-import { encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import { assertSourceEncoding, encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
@@ -946,6 +946,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// the ACP bridge has no encoding contract, so a routed GBK write is
 			// refused up front instead of letting the client land UTF-8 bytes.
 			const writeEncoding = resolveWriteEncoding(absolutePath, existing !== undefined);
+			assertSourceEncoding(absolutePath, cleanContent, writeEncoding);
 			let gbkBytes: Uint8Array | undefined;
 			if (writeEncoding === "gbk") {
 				if (await hasActiveWriteBridge(this.session, path, absolutePath)) {

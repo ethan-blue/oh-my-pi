@@ -1,7 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { assertStableGbkBytes, encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import {
+	assertSourceEncoding,
+	assertStableGbkBytes,
+	encodeStrict,
+	readTextWithPolicy,
+	resolveWriteEncoding,
+} from "../encoding/index";
 import { assertProtectedConfigMutation } from "../tools/protected-mode";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -184,6 +190,7 @@ export async function writeTextWithPolicy(filePath: string, text: string): Promi
 			return undefined;
 		});
 	const encoding = resolveWriteEncoding(filePath, original !== undefined);
+	assertSourceEncoding(filePath, text, encoding);
 	if (encoding === "gbk") {
 		if (original) assertStableGbkBytes(original, filePath);
 		await Bun.write(filePath, encodeStrict(text, "gbk"));
@@ -568,6 +575,7 @@ async function precheckTextOpEncodings(ops: ReadonlyArray<WorkspaceEditOp>): Pro
 		const result = applyTextEditsToString(content, op.edits);
 		try {
 			const gbk = resolveWriteEncoding(filePath, true) === "gbk";
+			assertSourceEncoding(filePath, result, gbk ? "gbk" : "utf8");
 			if (gbk) assertStableGbkBytes(bytes, filePath);
 			events.push({
 				path: filePath,

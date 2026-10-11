@@ -20,7 +20,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { EncodingPolicy, encodingDecodeStrict, encodingEncodeStrict } from "@oh-my-pi/pi-natives";
+import {
+	EncodingPolicy,
+	encodingDecodeStrict,
+	encodingEncodeStrict,
+	encodingValidateSource,
+} from "@oh-my-pi/pi-natives";
 
 export const ENCODING_CONFIG_RELATIVE = path.join(".omp", "encoding.json");
 
@@ -128,6 +133,13 @@ export function encodeStrict(text: string, encoding: ManagedEncoding): Uint8Arra
 	return encodingEncodeStrict(text, encoding);
 }
 
+/** Source declarations constrain the chosen charset; they never select it. */
+export function assertSourceEncoding(filePath: string, text: string, encoding: ManagedEncoding = "utf8"): void {
+	const extension = path.extname(filePath).toLowerCase();
+	if (extension !== ".py" && extension !== ".pyw") return;
+	encodingValidateSource(filePath, text, encoding);
+}
+
 /** Reject lossy normalization of valid but noncanonical GBK byte sequences. */
 export function assertStableGbkBytes(bytes: Uint8Array, filePath: string): void {
 	const encoded = encodeStrict(decodeStrict(bytes, "gbk"), "gbk");
@@ -158,7 +170,14 @@ export function readTextWithPolicy(
 		}
 		return { text: decodeStrict(bytes, "gbk"), encoding };
 	}
-	const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8");
+	let text: string;
+	try {
+		text = decodeStrict(bytes, "utf8");
+	} catch (error) {
+		throw new Error(
+			`${absolutePath}: ${String(error)}. No matching GBK policy; explicitly configure include and encoding overrides in this project's .omp/encoding.json, then re-read. Do not rewrite or guess the encoding.`,
+		);
+	}
 	return { text: text.startsWith("\u{FEFF}") ? text.slice(1) : text, encoding: undefined };
 }
 
@@ -174,6 +193,7 @@ export function encodeForWrite(
 	exists: boolean,
 ): { data: string | Uint8Array; encoding: "gbk" | undefined } {
 	const encoding = resolveFileEncoding(cwd, absolutePath, exists);
+	assertSourceEncoding(absolutePath, text, encoding ?? "utf8");
 	if (encoding === "gbk") {
 		return { data: encodeStrict(text, "gbk"), encoding };
 	}
