@@ -123,6 +123,27 @@ describe("GBK search and AST", () => {
 		).rejects.toThrow("invalid UTF-8");
 	});
 
+	for (const size of [128, 4 * 1024 * 1024 + 1024]) {
+		it(`grep skips NUL binary before strict decoding in directory and explicit-file modes (${size} bytes)`, async () => {
+			const binary = path.join(tmpDir, "src", "models.db");
+			const bytes = Buffer.alloc(size, 0x61);
+			bytes.set(Buffer.from("SQLite format 3\0needle\n"));
+			bytes[98] = 0xff;
+			await Bun.write(binary, bytes);
+			await Bun.write(path.join(tmpDir, "src", "text.txt"), "needle\n");
+			for (const encodingPolicy of [undefined, policyOption]) {
+				const directory = await grep({ pattern: "needle", path: path.join(tmpDir, "src"), encodingPolicy });
+				expect(directory.totalMatches).toBe(1);
+				expect(directory.matches[0]!.path).toEndWith("text.txt");
+				for (const mode of [GrepOutputMode.Content, GrepOutputMode.FilesWithMatches]) {
+					const explicit = await grep({ pattern: "needle", path: binary, mode, encodingPolicy });
+					expect(explicit.totalMatches).toBe(0);
+					expect(explicit.filesWithMatches).toBe(0);
+				}
+			}
+		});
+	}
+
 	for (const mode of [GrepOutputMode.Content, GrepOutputMode.Count, GrepOutputMode.FilesWithMatches]) {
 		it(`grep ${mode} rejects uncovered invalid bytes for both a file and recursive search`, async () => {
 			const file = path.join(tmpDir, "notes.txt");

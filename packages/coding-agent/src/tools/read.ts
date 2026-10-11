@@ -322,6 +322,18 @@ function formatOmittedRequestedLineNotice(
 	)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
 }
 
+/** Column-cap cuts of one read: the cap and the first-to-last cut line, for the `:raw` recovery notice. */
+interface ColumnCut {
+	maxColumn: number;
+	first: number;
+	last: number;
+}
+
+function addColumnCut(cut: ColumnCut | undefined, maxColumn: number, lineNumber: number): ColumnCut {
+	if (!cut) return { maxColumn, first: lineNumber, last: lineNumber };
+	return { maxColumn, first: Math.min(cut.first, lineNumber), last: Math.max(cut.last, lineNumber) };
+}
+
 /**
  * Slice the window {@link streamLinesFromFile} would have collected out of an
  * already-buffered file, under the identical line and byte budgets.
@@ -1631,7 +1643,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		fileEncoding?: "gbk",
 	): Promise<{
 		outputText: string;
-		columnTruncated: number;
+		columnCut: ColumnCut | undefined;
 		displayContent?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
@@ -1657,7 +1669,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 					if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 				}
-				return { outputText: "", columnTruncated: 0, bridgeResult };
+				return { outputText: "", columnCut: undefined, bridgeResult };
 			} catch (error) {
 				logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
 			}
@@ -1672,7 +1684,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const visibleSpans: Array<{ startLine: number; endLine: number }> = [];
 		const displayLineByNumber = new Map<number, string>();
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
-		let columnTruncated = 0;
+		let columnCut: ColumnCut | undefined;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
 
 		for (const range of ranges) {
@@ -1737,7 +1749,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (wasTruncated) {
 						if (!cloned) cloned = collectedLines.slice();
 						cloned[i] = text;
-						columnTruncated = maxColumns;
+						columnCut = addColumnCut(columnCut, maxColumns, range.startLine + i);
 					}
 				}
 				if (cloned) displayLines = cloned;
@@ -1771,7 +1783,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						if (maxColumns <= 0) return sourceText;
 						const truncated = truncateLine(sourceText, maxColumns);
 						if (truncated.wasTruncated) {
-							columnTruncated = maxColumns;
+							columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
 						}
 						return truncated.text;
 					},
@@ -1808,7 +1820,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (notices.length > 0) {
 			outputText = outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n");
 		}
-		return { outputText, columnTruncated, displayContent };
+		return { outputText, columnCut, displayContent };
 	}
 
 	async execute(
@@ -2219,7 +2231,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let details: ReadToolDetails = {};
 		let sourcePath: string | undefined;
 		let pagedSource = false;
-		let columnTruncated = 0;
+		let columnCut: ColumnCut | undefined;
 		let truncationInfo:
 			| {
 					result: TruncationResult;
@@ -2473,9 +2485,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
-					if (multiResult.columnTruncated > 0) {
-						columnTruncated = multiResult.columnTruncated;
-					}
+					columnCut = multiResult.columnCut;
 				} else {
 					// Raw text or line-range mode
 					const { offset, limit } = selToOffsetLimit(sel);
@@ -2618,7 +2628,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							if (wasTruncated) {
 								if (!cloned) cloned = collectedLines.slice();
 								cloned[i] = text;
-								columnTruncated = maxColumns;
+								columnCut = addColumnCut(columnCut, maxColumns, startLineDisplay + i);
 							}
 						}
 						if (cloned) displayLines = cloned;
@@ -2730,7 +2740,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									if (maxColumns <= 0) return sourceText;
 									const truncated = truncateLine(sourceText, maxColumns);
 									if (truncated.wasTruncated) {
-										columnTruncated = maxColumns;
+										columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
 									}
 									return truncated.text;
 								},
@@ -2943,8 +2953,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		}
-		if (columnTruncated > 0) {
-			resultBuilder.limits({ columnMax: columnTruncated });
+		if (columnCut) {
+			resultBuilder.limits({
+				columnMax: columnCut.maxColumn,
+				columnLines: { first: columnCut.first, last: columnCut.last },
+				columnSelectorBase: selectorBase,
+			});
 		}
 		return resultBuilder.done();
 	}
@@ -2998,7 +3012,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		question: string | undefined,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		if (parsedSel.kind === "image") throw new ToolError("The ':img' selector requires a file-backed path.");
+		if (parsedSel.kind === "image") {
+			// A file-backed URL that locate deferred to a remote resolve (an unknown skill:// while
+			// MCP is available) reports its local miss (`Unknown skill`), not the selector refusal.
+			if (spec.backing === "file") {
+				await InternalUrlRouter.instance().locate(url, sessionResolveContext(this.session, { signal }), {
+					localOnly: true,
+				});
+			}
+			throw new ToolError("The ':img' selector requires a file-backed path.");
+		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const resourceDetails: NonNullable<InternalResource["details"]> = resource.details ?? {};
@@ -3022,7 +3045,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: spec.unbounded === true,
+			ignoreResultLimits: resource.unbounded ?? spec.unbounded === true,
 			immutable: resource.immutable,
 		});
 	}

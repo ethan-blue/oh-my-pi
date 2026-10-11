@@ -1,34 +1,41 @@
-# ompg v18.8.7-gbk.1 验收记录
+# ompg v18.9.0-gbk.1 验收记录
 
-日期：2026-10-09。平台：Windows x64，Bun 1.4.2，Rust nightly-2026-10-06 / MSVC。发布类型：未签名预发布版，Windows x64 AVX2。
+日期：2026-10-11。Windows x64 AVX2，Bun 1.4.2，Rust nightly-2026-10-06 / MSVC。未签名预发布版。
 
 ## 来源与构建
 
-- 合并官方发布标签 OMP v18.8.7，提交 `f261ed9faf16b61880b544f599876bface4ded0d`；不包含其后未发布的 main 提交。
-- `bun run build:native` 成功，使用本机优化 local profile；链接器有上游 CRT/wasmtime 警告，构建与加载成功。
-- 独立程序构建成功；`--version` 返回 `ompg/18.8.7-gbk.1`，`--smoke-test` 返回 `smoke-test: ok`。
-- 最终源码提交、原生模块摘要与工具链信息见压缩包内 build-info.json。打包要求工作树干净且成品 SHA 与 HEAD 一致。
+- 合并核实的最新官方正式版 OMP v18.9.0，提交 `eec114a9226da698ebc015fd8996a8ca3bc4625c`；不发布后续未验收 main。
+- frozen lockfile 安装与 RPC 四语言代码生成成功。
+- `bun run build:native` 成功：Windows modern 优化构建，143 exports。原生 SHA256：`f05f765e6c605f3d5e4aefc571df0f0e1c80340fe598d3bb7f3b42200ea5080b`。
+- native 链接仍有上游 LNK4217 / wasmtime 警告；加载和回归通过。不宣称构建日志零警告。
+- 独立 EXE 构建、`--version` (`ompg/18.9.0-gbk.1`)、`--smoke-test` (`smoke-test: ok`) 通过；`update --check` 保持 fork 自更新阻断与手动升级指引。
+- 正式发布包要求工作树干净、打包 SHA 与 HEAD 一致；最终源码身份见包内 build-info.json，外层和内层 SHA256SUMS.txt 分别校验资产与文件。
 
-## 本轮验证
+## 本轮门禁
 
-| 检查 | 结果 |
+| 检查 | 实测结果 |
 | --- | --- |
-| `bun check` | 通过：格式、lint、各包 TypeScript 检查及 Rust clippy / fmt |
-| 11 文件相关 TypeScript 回归 | 199 通过、23 平台跳过、0 失败、673 断言 |
-| `bun run test:rs` | 3011 通过、4 跳过、0 失败；文档测试另 1 通过、18 忽略 |
-| 新原生模块的 GBK / AST / LSP / 保护模式回归 | 通过，包含在上述结果中 |
-| 安装器测试 | 安装、升级、回退、同版本不同内容拒绝、损坏校验拒绝、保守卸载通过 |
-| 真实程序升级回退 | 隔离目录 18.8.4-gbk.1 → 18.8.7-gbk.1 → 18.8.4-gbk.1 通过 |
-| 原版共存 | 安装测试前后原版 omp.exe SHA256 与用户 PATH 不变 |
+| `bun check` | 通过，退出 0：5986 文件格式、lint、17 包类型检查、Rust fmt / clippy |
+| `bun run test:rs` | 3061 passed、4 skipped，退出 0；doctest 另 1 passed、18 ignored |
+| GBK / PTY / eval / stderr / 消费方 15 文件 | 154 passed、3 skipped、0 failed、584 assertions，退出 0 |
+| Python integration / dispatch / shell 3 文件 | 32 passed、4 skipped、0 failed、149 assertions，退出 0 |
+| read / grep / write / AST / LSP 相邻 10 文件 | 154 passed、11 skipped、0 failed、624 assertions，退出 0 |
+| 身份 / extension / eval / 更新器 11 文件 | 118 passed、6 skipped、7 failed、451 assertions，退出 1；七项失败均为 fs.symlink EPERM 环境阻塞 |
+| 空白检查 | fork 未暂存差异通过；合并暂存差异仅保留上游 SCSS.sublime-syntax 的 EOF 空行提示，排除此已知项后通过 |
+| 安装器隔离回归 | 安装、升级、回退、同版本不同内容拒绝、校验损坏拒绝、保守卸载通过 |
+| 真实 EXE 升级回退 | 18.8.7-gbk.1 → 18.9.0-gbk.1 → 18.8.7-gbk.1，通过字节摘要核对 |
+| 原版共存 | 安装测试前后原版 omp.exe（存在时）的 SHA256 与用户 PATH 不变；更新器 ompg shim 测试保留同目录 omp.cmd |
 
-Rust 测试 PATH 包含 Git for Windows 的 POSIX 工具。修正两项平台测试假设：UTF-8 截断测试显式指定 UTF-8 fallback，sed 截断测试分别断言 Unix 快照和 Windows 流式行为；没有改动对应生产实现，也没有跳过这两项测试。
+本轮新增搜索回归验证 NUL 二进制优先跳过，覆盖目录、显式文件、files-with-matches 与 >4 MiB prefix，策略开关两种路径。真实 advisor grep 消费方恢复通过；无 NUL 的非法文本仍严格拒绝，未更换 codec 或绕过断言。
 
-TypeScript 回归文件：gbk-encoding、gbk-validation、gbk-search-ast、gbk-lsp-recovery、gbk-protected-mode、tools/ast-edit、tools/shell-tokenize、tools/lsp-regressions，以及 utils 的 ptree-stderr、ptree-timeout、ptree-bytes。本轮未重跑全量 TypeScript 套件，不沿用旧版本全量结果。
+更新器七项环境阻塞是 npm/Bun/Homebrew 的符号链接目标检测用例，未改系统权限、删除或跳过失败用例。这不作为全部 TypeScript 通过的证据；本 fork 正常自更新被禁用，发布使用另行验证的 Windows install-ompg.ps1。
 
-## 未验证项与边界
+## 未验证与边界
 
-- GBK 使用显式 encoding.json 策略，不承诺自动识别全部编码或 GB18030。
-- 保护模式限制内置工具和受信构建入口，不是操作系统沙箱；外部进程和允许的构建脚本仍需可信。
-- E630、Keil、真实付费模型、真实 LSP 服务器端到端、其他平台及无 AVX2 CPU：未验证。
-- 本版未重测性能，不沿用旧版性能结论，不宣称所有模块最优。
-- 本文件记录上传前本地验收；GitHub 下载校验与发布状态另记 docs/gbk-handoff/13-release-18.8.7-gbk.1.md。
+- 全仓 TypeScript 测试未执行；上表只记录列明套件。Rust 测试保留上游 test-only dead-code 警告。
+- Unix 实机与 symlink containment 权限依赖路径未通过验证；不以 Windows 编译冒充 Unix 证明。
+- GBK 显式策略，不猜全部编码，不支持 GB18030；大文件诊断覆盖实际读取窗口。
+- PTY / Python PIPE / JS Buffer 捕获复用 native decoder；ConPTY 已转换字节无法恢复。Python fd-1 无单请求归属，JS 持久 writer 无 EOF 证据时保持 unknown；用户代码内部错误解码的字符串不可逆，继承子进程 raw stdio 不保证经过 JS write hook。
+- 保护模式是工具入口限制，不是 OS 沙箱。外部程序、第三方扩展及可信构建钩子需单独约束。
+- E630 / Keil、真实模型、真实 LSP 服务器端到端、无 AVX2 CPU、其他平台、NumPy / matplotlib 缺依赖分支、同机性能 A/B：未验证。
+- 本文件是上传前本地验收；GitHub 下载回读与公开状态另记 `docs/gbk-handoff/30-release-18.9.0-gbk.1.md`。

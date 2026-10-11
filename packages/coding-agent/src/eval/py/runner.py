@@ -148,7 +148,7 @@ def _read_raw_window(receiver: _RawTextReceiver) -> None:
     # on that helper's EOF acknowledgement. Queued cells stay queued.
     try:
         while not receiver.done.is_set():
-            line = sys.__stdin__.readline()
+            line = _CONTROL_IN.readline()
             if not line:
                 raise RuntimeError("Host closed the raw-output response channel")
             req = _parse_request(line.strip())
@@ -161,6 +161,20 @@ def _read_raw_window(receiver: _RawTextReceiver) -> None:
         receiver.done.set()
         with receiver.credits:
             receiver.credits.notify_all()
+# Requests likewise arrive on a private dup of the original stdin, and fd 0
+# itself is repointed at os.devnull: user code, and every process it spawns
+# without an explicit stdin, then reads immediate EOF instead of blocking on
+# (or stealing frames from) a control channel that stays open for the
+# kernel's whole life. The host still writes NDJSON requests to the
+# subprocess stdin.
+try:
+    _CONTROL_FD = os.dup(sys.__stdin__.fileno())
+    _CONTROL_IN = os.fdopen(_CONTROL_FD, "r", encoding="utf-8")
+    _devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(_devnull_fd, sys.__stdin__.fileno())
+    os.close(_devnull_fd)
+except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+    _CONTROL_IN = sys.__stdin__
 
 
 def _json_default(o: Any) -> Any:
@@ -1694,9 +1708,10 @@ def _magic_cell_writefile(args: str, body: str) -> str:
 
 
 def _run_shell_body(body: str, *, shell_arg: str) -> int:
-    # stdin=DEVNULL: children must not inherit the runner's stdin, which is
-    # the host's NDJSON control channel (a reading child would steal frames,
-    # and inheriting the pipe deadlocks nested interpreters on Windows).
+    # stdin=DEVNULL: children must never read the host's NDJSON control
+    # channel (a reading child would steal frames, and inheriting the pipe
+    # deadlocks nested interpreters on Windows). fd 0 already points at
+    # os.devnull; this stays explicit for when that redirect failed.
     proc = subprocess.Popen(
         [shell_arg, "-c", body],
         stdin=subprocess.DEVNULL,
@@ -2541,7 +2556,7 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
     block sibling requests: auto-backgrounded cells, user Python shortcuts, and
     kernel-defined tool calls from subagents can all be in flight on one kernel
     at once. The reader thread stays blocked in a
-    ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
+    control-channel read for its whole life, which is safe on POSIX but wedges
     native-extension imports on Windows (see ``_serve_windows``).
     """
     queue: asyncio.Queue = asyncio.Queue()
@@ -2590,7 +2605,7 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
     """Dispatch requests serially, serving tool requests between cells.
 
-    A thread perpetually parked in a blocking ``sys.stdin`` read deadlocks
+    A thread perpetually parked in a blocking control-channel read deadlocks
     native-extension imports (NumPy in particular) under a pipe-backed
     subprocess on Windows: the native DLL load and the concurrent stdin read
     wedge each other (numpy#24290, issue #7985). Reading each line via
@@ -2649,7 +2664,7 @@ async def _main_async() -> None:
     _start_parent_watchdog()
     _start_capture_drain()
 
-    stdin = sys.__stdin__
+    stdin = _CONTROL_IN
     if stdin is None:
         return
 

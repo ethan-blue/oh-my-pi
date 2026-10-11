@@ -76,11 +76,14 @@ pub fn decode_strict(bytes: &[u8], encoding: TextEncoding) -> Result<String, usi
 /// decoder's nonfinal state so a trailing partial character is withheld rather
 /// than replaced or mistaken for an invalid complete file. Unread tails are
 /// intentionally outside this validation contract.
+/// When `binary_byte` is present, a window containing that byte returns `None`
+/// before text validation, preserving the caller's existing binary-file rule.
 pub fn read_validated_prefix(
 	reader: impl std::io::Read,
 	limit: usize,
 	encoding: TextEncoding,
-) -> std::io::Result<Vec<u8>> {
+	binary_byte: Option<u8>,
+) -> std::io::Result<Option<Vec<u8>>> {
 	let codec = match encoding {
 		TextEncoding::Utf8 => encoding_rs::UTF_8,
 		TextEncoding::Gbk => encoding_rs::GBK,
@@ -92,6 +95,9 @@ pub fn read_validated_prefix(
 		.read_to_end(&mut prefix)?;
 	let truncated = prefix.len() > limit;
 	prefix.truncate(limit);
+	if binary_byte.is_some_and(|byte| prefix.contains(&byte)) {
+		return Ok(None);
+	}
 	let mut output = vec![0u8; 64 * 1024];
 	let mut consumed = 0usize;
 	loop {
@@ -120,7 +126,7 @@ pub fn read_validated_prefix(
 		// Nonfinal validation passed: withhold the incomplete window suffix.
 		prefix.truncate(boundary);
 	}
-	Ok(prefix)
+	Ok(Some(prefix))
 }
 
 /// Whether BOM-free, non-ASCII `bytes` are also strictly valid UTF-8.
@@ -789,11 +795,21 @@ mod tests {
 			(&b"a\xe4\xb8\xad\xff"[..], TextEncoding::Utf8),
 			(&b"a\xd6\xd0\xff"[..], TextEncoding::Gbk),
 		] {
-			assert_eq!(read_validated_prefix(bytes, 2, encoding).unwrap(), b"a");
-			assert!(read_validated_prefix(bytes, 8, encoding).is_err());
+			assert_eq!(read_validated_prefix(bytes, 2, encoding, None).unwrap(), Some(b"a".to_vec()));
+			assert!(read_validated_prefix(bytes, 8, encoding, None).is_err());
 		}
-		assert!(read_validated_prefix(&b"a\xe4"[..], 2, TextEncoding::Utf8).is_err());
-		assert!(read_validated_prefix(&b"a\xd6"[..], 2, TextEncoding::Gbk).is_err());
+		assert!(read_validated_prefix(&b"a\xe4"[..], 2, TextEncoding::Utf8, None).is_err());
+		assert!(read_validated_prefix(&b"a\xd6"[..], 2, TextEncoding::Gbk, None).is_err());
+	}
+
+	#[test]
+	fn binary_prefix_is_classified_before_strict_text_validation() {
+		let bytes = &b"needle\0\xff"[..];
+		for encoding in [TextEncoding::Utf8, TextEncoding::Gbk] {
+			assert_eq!(read_validated_prefix(bytes, 32, encoding, Some(0)).unwrap(), None);
+			assert!(read_validated_prefix(bytes, 32, encoding, None).is_err());
+		}
+		assert!(read_validated_prefix(&b"needle\xff"[..], 32, TextEncoding::Utf8, Some(0)).is_err());
 	}
 
 	#[test]
