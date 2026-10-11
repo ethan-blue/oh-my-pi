@@ -28,6 +28,7 @@ The params object is one cell. There is no `cells` array, header parser, languag
 | `title` | `string` | No | Short transcript label. |
 | `timeout` | `number` | No | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. Paused host waits resume with a fresh window, not the unused remainder. |
 | `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
+| `outputEncoding` | `"gbk" \| "utf8"` | No | Decode Python shell-helper subprocess PIPE bytes and JavaScript default/UTF-8 Buffer writes using CP936 or UTF-8 only. Omitted means native auto mode. Ordinary strings are unchanged; Python kernel-scope fd-1 uses its persistent auto decoder. |
 
 Example across three calls:
 
@@ -42,6 +43,14 @@ Example across three calls:
 ```json
 {"language":"py","title":"reuse state","code":"display(sorted(data['dependencies']))"}
 ```
+
+## Captured output encoding
+
+Use `outputEncoding: "gbk"` when a subprocess invoked by Python's `!` / shell helper emits CP936 bytes. The host's native decoder handles raw bytes and returns decoded text to the helper, preserving its captured return value. Display limits still drain the PIPE; its completed summary requires both EOF and the runner's text-delivery acknowledgement.
+
+JavaScript `process.stdout/stderr.write(Buffer)` with default/UTF-8 encoding is decoded on the host. These persistent writers have no proven EOF at cell completion, so their provenance remains incomplete. Ordinary Python/JavaScript strings and explicitly selected other Buffer text encodings retain their existing behavior. A string already decoded incorrectly inside user code cannot be repaired by this option.
+
+Cell details may contain `outputEncoding`, `outputReplacements`, `outputEncodings` and `outputEncodingUnknownReaders`; tool text labels mixed, lossy or incomplete capture. Unknown readers withhold the uniform encoding and total substitutions. Python's raw kernel fd-1 is a separate, bounded `kernel-scope output; request ownership unknown` section: late bytes and fragments are not assigned to the next cell's stdout. Inherited child stdio bypassing the JavaScript write hook is outside that hook's capture coverage.
 
 ## Scripts and dependencies
 

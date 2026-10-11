@@ -3127,6 +3127,18 @@ pub struct BashResult {
 	pub artifact_error: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
+	/// The ONE encoding every settled output reader used (`utf8`, `gbk`, or `cp<N>`); null when readers disagreed (see outputEncodings) or any finished without a summary (see outputEncodingUnknownReaders).
+	#[serde(rename = "outputEncoding", default, skip_serializing_if = "Option::is_none")]
+	pub output_encoding: Option<String>,
+	/// Distinct encodings among the settled output readers, first-seen order (one per captured stream/chain segment); null when nothing was observed.
+	#[serde(rename = "outputEncodings", default, skip_serializing_if = "Option::is_none")]
+	pub output_encodings: Option<Vec<String>>,
+	/// Undecodable byte sequences substituted across all settled readers (U+FFFD in the UTF-8/GBK modes, the Windows default character in the ACP mode); null while any reader is unobserved.
+	#[serde(rename = "outputReplacements", default, skip_serializing_if = "Option::is_none")]
+	pub output_replacements: Option<i64>,
+	/// Captured output readers that finished WITHOUT a decode summary; null when every reader settled.
+	#[serde(rename = "outputEncodingUnknownReaders", default, skip_serializing_if = "Option::is_none")]
+	pub output_encoding_unknown_readers: Option<i64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 }

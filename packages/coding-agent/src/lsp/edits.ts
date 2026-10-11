@@ -5,6 +5,7 @@ import {
 	assertSourceEncoding,
 	assertStableGbkBytes,
 	encodeStrict,
+	gbkUtf8AmbiguityNotice,
 	readTextWithPolicy,
 	resolveWriteEncoding,
 } from "../encoding/index";
@@ -344,6 +345,8 @@ export interface WorkspaceEditResult {
 	applied: string[];
 	/** Ops that mutated the filesystem — skipped `ignoreIfExists`/`ignoreIfNotExists` ops are excluded. */
 	executed: ExecutedWorkspaceChange[];
+	/** G4 ambiguity diagnostics for files touched by this edit, if any. */
+	encodingNotes?: string[];
 }
 
 /**
@@ -363,6 +366,7 @@ export async function applyWorkspaceEdit(
 ): Promise<WorkspaceEditResult> {
 	const applied: string[] = [];
 	const executed: ExecutedWorkspaceChange[] = [];
+	const encodingNotes: string[] = [];
 	const record = (change: ExecutedWorkspaceChange) => {
 		executed.push(change);
 		onExecuted?.(change);
@@ -376,7 +380,7 @@ export async function applyWorkspaceEdit(
 		// Batch encoding precheck: decode every input and strictly encode
 		// every output BEFORE the first write, so one unrepresentable file
 		// fails the whole batch instead of leaving earlier files modified.
-		await precheckTextOpEncodings(ops);
+		await precheckTextOpEncodings(ops, cwd, encodingNotes);
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
@@ -489,6 +493,8 @@ export async function applyWorkspaceEdit(
 			Object.entries(changes)
 				.filter(([, textEdits]) => textEdits.length > 0)
 				.map(([uri, textEdits]) => ({ kind: "text", uri, edits: textEdits })),
+			cwd,
+			encodingNotes,
 		);
 		for (const uri in changes) {
 			const textEdits = changes[uri];
@@ -500,7 +506,7 @@ export async function applyWorkspaceEdit(
 		}
 	}
 
-	return { applied, executed };
+	return { applied, executed, ...(encodingNotes.length > 0 ? { encodingNotes } : {}) };
 }
 
 /**
@@ -510,7 +516,11 @@ export async function applyWorkspaceEdit(
  * whole batch with zero writes (R06: partial cross-file writes are not
  * acceptable for an error a precheck can predict).
  */
-async function precheckTextOpEncodings(ops: ReadonlyArray<WorkspaceEditOp>): Promise<void> {
+async function precheckTextOpEncodings(
+	ops: ReadonlyArray<WorkspaceEditOp>,
+	cwd?: string,
+	encodingNotes?: string[],
+): Promise<void> {
 	type State = { bytes?: Uint8Array; directory: boolean };
 	type Event = { path: string; state?: State } | { from: string; to: string };
 	const events: Event[] = [];
@@ -572,6 +582,10 @@ async function precheckTextOpEncodings(ops: ReadonlyArray<WorkspaceEditOp>): Pro
 		const bytes = state?.bytes;
 		if (!bytes) throw new ToolError(`LSP workspace edit targets unreadable file: ${filePath}`);
 		const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
+		if (cwd && encodingNotes) {
+			const note = gbkUtf8AmbiguityNotice(cwd, filePath, bytes);
+			if (note && !encodingNotes.includes(note)) encodingNotes.push(note);
+		}
 		const result = applyTextEditsToString(content, op.edits);
 		try {
 			const gbk = resolveWriteEncoding(filePath, true) === "gbk";

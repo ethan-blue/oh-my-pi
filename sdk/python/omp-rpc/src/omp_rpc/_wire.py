@@ -688,6 +688,14 @@ class BashResult:
     artifact_elided_bytes: int | None = None
     artifact_error: JsonObject | None = None
     working_dir: str | None = None
+    output_encoding: str | None = None
+    """The ONE encoding every settled output reader used (`utf8`, `gbk`, or `cp<N>`); null when readers disagreed (see outputEncodings) or any finished without a summary (see outputEncodingUnknownReaders)."""
+    output_encodings: tuple[str, ...] | None = None
+    """Distinct encodings among the settled output readers, first-seen order (one per captured stream/chain segment); null when nothing was observed."""
+    output_replacements: int | None = None
+    """Undecodable byte sequences substituted across all settled readers (U+FFFD in the UTF-8/GBK modes, the Windows default character in the ACP mode); null while any reader is unobserved."""
+    output_encoding_unknown_readers: int | None = None
+    """Captured output readers that finished WITHOUT a decode summary; null when every reader settled."""
     images: tuple[ImageContent, ...] | None = None
 
 
@@ -1959,6 +1967,10 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_elided_bytes=optional(payload, "artifactElidedBytes", decode_int, path),
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
+        output_encoding=optional(payload, "outputEncoding", decode_str, path),
+        output_encodings=optional(payload, "outputEncodings", array(decode_str), path),
+        output_replacements=optional(payload, "outputReplacements", decode_int, path),
+        output_encoding_unknown_readers=optional(payload, "outputEncodingUnknownReaders", decode_int, path),
         images=optional(payload, "images", array(parse_image_content), path),
     )
 

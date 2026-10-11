@@ -231,19 +231,30 @@ pub struct GrepMatch {
 #[napi(object)]
 pub struct GrepResult {
 	/// Matches or per-file counts, depending on output mode.
-	pub matches:            Vec<GrepMatch>,
+	pub matches:                  Vec<GrepMatch>,
 	/// Total matches across all files, or matched file count in filesWithMatches
 	/// mode.
-	pub total_matches:      u32,
+	pub total_matches:            u32,
 	/// Number of files with at least one match.
-	pub files_with_matches: u32,
+	pub files_with_matches:       u32,
 	/// Number of files searched.
-	pub files_searched:     u32,
+	pub files_searched:           u32,
 	/// Whether the limit/offset stopped the search early.
-	pub limit_reached:      Option<bool>,
+	pub limit_reached:            Option<bool>,
 	/// Number of files skipped because they exceed the size limit.
-	pub skipped_oversized:  Option<u32>,
+	pub skipped_oversized:        Option<u32>,
+	/// Up to [`AMBIGUOUS_ENCODING_FILES_CAP`] files the encoding policy decoded
+	/// as GBK through an include rule (not an explicit override) whose
+	/// BOM-free, non-ASCII searched bytes are also strictly valid UTF-8. Both
+	/// encodings read them as different text; an explicit `.omp/encoding.json`
+	/// override resolves which one is right. The search still follows the
+	/// policy — this is a diagnostic, never an encoding switch.
+	pub ambiguous_encoding_files: Option<Vec<String>>,
 }
+
+/// Cap on files listed in [`GrepResult::ambiguous_encoding_files`]; beyond it
+/// the diagnostic stays silent rather than flooding a broad search.
+const AMBIGUOUS_ENCODING_FILES_CAP: usize = 10;
 
 enum TypeFilter {
 	Known { exts: &'static [&'static str], names: &'static [&'static str] },
@@ -1303,10 +1314,30 @@ struct PassState<'a> {
 	files_searched:         AtomicU64,
 	skipped_oversized:      AtomicU64,
 	emitted:                AtomicU64,
+	/// Files whose GBK include-rule decode was byte-ambiguously also valid
+	/// UTF-8 (capped at [`AMBIGUOUS_ENCODING_FILES_CAP`] entries).
+	ambiguous_files:        Mutex<Vec<String>>,
 	sink:                   Option<&'a dyn MatchSink>,
 	streamed_matches:       AtomicU64,
 	streamed_files:         AtomicU64,
 	streamed_limit_reached: AtomicBool,
+}
+
+impl PassState<'_> {
+	/// Record one include-rule GBK file whose searched bytes are also valid
+	/// UTF-8; past the cap the list stays capped instead of growing.
+	fn note_ambiguous_file(&self, path: &str) {
+		let mut files = self.ambiguous_files.lock();
+		if files.len() < AMBIGUOUS_ENCODING_FILES_CAP && !files.iter().any(|p| p == path) {
+			files.push(path.to_owned());
+		}
+	}
+
+	/// The capped ambiguity list, or `None` when empty.
+	fn ambiguous_encoding_files(&self) -> Option<Vec<String>> {
+		let files = self.ambiguous_files.lock();
+		(!files.is_empty()).then(|| files.clone())
+	}
 }
 
 impl<'a> PassState<'a> {
@@ -1330,6 +1361,7 @@ impl<'a> PassState<'a> {
 			files_searched: AtomicU64::default(),
 			skipped_oversized: AtomicU64::default(),
 			emitted: AtomicU64::default(),
+			ambiguous_files: Mutex::default(),
 			sink,
 			streamed_matches: AtomicU64::default(),
 			streamed_files: AtomicU64::default(),
@@ -1342,16 +1374,23 @@ impl<'a> PassState<'a> {
 	fn streamed_result(&self) -> GrepResult {
 		let skipped_oversized = self.skipped_oversized.load(Ordering::Relaxed);
 		GrepResult {
-			matches:            Vec::new(),
-			total_matches:      crate::utils::clamp_u32(self.streamed_matches.load(Ordering::Relaxed)),
-			files_with_matches: crate::utils::clamp_u32(self.streamed_files.load(Ordering::Relaxed)),
-			files_searched:     crate::utils::clamp_u32(self.files_searched.load(Ordering::Relaxed)),
-			limit_reached:      self
+			matches:                  Vec::new(),
+			total_matches:            crate::utils::clamp_u32(
+				self.streamed_matches.load(Ordering::Relaxed),
+			),
+			files_with_matches:       crate::utils::clamp_u32(
+				self.streamed_files.load(Ordering::Relaxed),
+			),
+			files_searched:           crate::utils::clamp_u32(
+				self.files_searched.load(Ordering::Relaxed),
+			),
+			limit_reached:            self
 				.streamed_limit_reached
 				.load(Ordering::Relaxed)
 				.then_some(true),
-			skipped_oversized:  (skipped_oversized > 0)
+			skipped_oversized:        (skipped_oversized > 0)
 				.then(|| crate::utils::clamp_u32(skipped_oversized)),
+			ambiguous_encoding_files: self.ambiguous_encoding_files(),
 		}
 	}
 }
@@ -1427,7 +1466,8 @@ fn read_file_prefix(
 
 /// Read one candidate per `policy` and search it, classifying the result.
 /// Content matches stream to `sink` when given; its delivery failure is the
-/// only error.
+/// only error. Returns the outcome plus whether the file's searched bytes
+/// were byte-ambiguously valid UTF-8 under a GBK include rule.
 fn search_one_file<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	worker: &mut SearchWorker,
@@ -1437,7 +1477,7 @@ fn search_one_file<M: Matcher + Sync>(
 	policy: ReadPolicy,
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	sink: Option<&dyn MatchSink>,
-) -> Result<FileOutcome> {
+) -> Result<(FileOutcome, bool)> {
 	let read = match policy {
 		ReadPolicy::Full => {
 			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
@@ -1446,26 +1486,24 @@ fn search_one_file<M: Matcher + Sync>(
 			read_file_prefix(fs, &file.path, &mut worker.buffer, encoding.map(AsRef::as_ref))
 		},
 	};
-	match read {
-		Ok(ReadFile::Read) => {
-			crate::encoding::transcode_search_strict(
-				&mut worker.buffer,
-				&file.path,
-				encoding.map(AsRef::as_ref),
-			)?;
-		},
-		Ok(ReadFile::Oversized) => return Ok(FileOutcome::Defer),
+	let transcode = match read {
+		Ok(ReadFile::Read) => crate::encoding::transcode_search_strict(
+			&mut worker.buffer,
+			&file.path,
+			encoding.map(AsRef::as_ref),
+		)?,
+		Ok(ReadFile::Oversized) => return Ok((FileOutcome::Defer, false)),
 		Ok(ReadFile::Skipped) => {
 			return Ok(match policy {
-				ReadPolicy::Prefix => FileOutcome::SkippedOversized,
-				ReadPolicy::Full => FileOutcome::Skipped,
+				ReadPolicy::Prefix => (FileOutcome::SkippedOversized, false),
+				ReadPolicy::Full => (FileOutcome::Skipped, false),
 			});
 		},
 		Err(err) if err.kind() == io::ErrorKind::InvalidData => {
 			return Err(Error::from_reason(err.to_string()));
 		},
-		Err(_) => return Ok(FileOutcome::Skipped),
-	}
+		Err(_) => return Ok((FileOutcome::Skipped, false)),
+	};
 	let search = match sink {
 		Some(sink) if file_params.mode == OutputMode::Content => run_streaming_search_slice(
 			&mut worker.searcher,
@@ -1480,12 +1518,15 @@ fn search_one_file<M: Matcher + Sync>(
 	};
 	// A searcher error counts as searched-with-no-matches, matching the prior
 	// behavior (the file was read and attempted).
-	Ok(FileOutcome::Searched(search.unwrap_or(SearchResultInternal {
-		matches:       Vec::new(),
-		match_count:   0,
-		collected:     0,
-		limit_reached: false,
-	})))
+	Ok((
+		FileOutcome::Searched(search.unwrap_or(SearchResultInternal {
+			matches:       Vec::new(),
+			match_count:   0,
+			collected:     0,
+			limit_reached: false,
+		})),
+		transcode.utf8_ambiguous,
+	))
 }
 
 /// Search one candidate and fold its outcome into the shared [`PassState`].
@@ -1505,7 +1546,7 @@ fn handle_file<M: Matcher + Sync>(
 	{
 		return Ok(());
 	}
-	match search_one_file(
+	let (outcome, utf8_ambiguous) = search_one_file(
 		&state.fs,
 		worker,
 		matcher,
@@ -1514,7 +1555,11 @@ fn handle_file<M: Matcher + Sync>(
 		policy,
 		state.encoding.as_ref(),
 		state.sink,
-	)? {
+	)?;
+	if utf8_ambiguous {
+		state.note_ambiguous_file(&file.relative);
+	}
+	match outcome {
 		FileOutcome::Defer => {
 			state.deferred.lock().push(file.clone());
 		},
@@ -1619,7 +1664,7 @@ fn process_candidates<M: Matcher + Sync>(
 	stop_after_matches: Option<u64>,
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
 	let file_params = per_file_params(params);
 	let state = PassState::new(fs, encoding.cloned());
 
@@ -1670,6 +1715,7 @@ fn process_candidates<M: Matcher + Sync>(
 		results,
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
+		state.ambiguous_files.lock().clone(),
 	))
 }
 
@@ -1686,7 +1732,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 	stop_after_matches: Option<u64>,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
 	let Some(candidates) = collect_grep_candidates(
 		fs,
 		search_path,
@@ -1699,7 +1745,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 		ct,
 	)?
 	else {
-		return Ok((Vec::new(), 0, 0));
+		return Ok((Vec::new(), 0, 0, Vec::new()));
 	};
 	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, encoding, ct)
 }
@@ -1808,7 +1854,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
 	stop_after_matches: u64,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
 	let request = build_grep_walk_request(
 		fs,
 		search_path,
@@ -1890,6 +1936,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		results,
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
+		state.ambiguous_files.lock().clone(),
 	))
 }
 
@@ -1905,7 +1952,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	skip_node_modules: bool,
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
 		None => {
@@ -1926,6 +1973,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				results,
 				state.skipped_oversized.load(Ordering::Relaxed),
 				state.files_searched.load(Ordering::Relaxed),
+				state.ambiguous_files.lock().clone(),
 			))
 		},
 		Some(stop) if stop <= ORDERED_STREAMING_STOP_MAX_COUNT || pi_walker::walk_workers() <= 1 => {
@@ -2203,12 +2251,13 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 
 	if !metadata.is_file() && !metadata.is_dir() {
 		return Ok(GrepResult {
-			matches:            Vec::new(),
-			total_matches:      0,
-			files_with_matches: 0,
-			files_searched:     0,
-			limit_reached:      None,
-			skipped_oversized:  None,
+			matches:                  Vec::new(),
+			total_matches:            0,
+			files_with_matches:       0,
+			files_searched:           0,
+			limit_reached:            None,
+			skipped_oversized:        None,
+			ambiguous_encoding_files: None,
 		});
 	}
 
@@ -2217,12 +2266,13 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			&& !matches_type_filter(&search_path, filter)
 		{
 			return Ok(GrepResult {
-				matches:            Vec::new(),
-				total_matches:      0,
-				files_with_matches: 0,
-				files_searched:     0,
-				limit_reached:      None,
-				skipped_oversized:  None,
+				matches:                  Vec::new(),
+				total_matches:            0,
+				files_with_matches:       0,
+				files_searched:           0,
+				limit_reached:            None,
+				skipped_oversized:        None,
+				ambiguous_encoding_files: None,
 			});
 		}
 
@@ -2237,28 +2287,34 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					},
 					_ => {
 						return Ok(GrepResult {
-							matches:            Vec::new(),
-							total_matches:      0,
-							files_with_matches: 0,
-							files_searched:     0,
-							limit_reached:      None,
-							skipped_oversized:  Some(1),
+							matches:                  Vec::new(),
+							total_matches:            0,
+							files_with_matches:       0,
+							files_searched:           0,
+							limit_reached:            None,
+							skipped_oversized:        Some(1),
+							ambiguous_encoding_files: None,
 						});
 					},
 				}
 			},
 			Ok(ReadFile::Skipped) | Err(_) => {
 				return Ok(GrepResult {
-					matches:            Vec::new(),
-					total_matches:      0,
-					files_with_matches: 0,
-					files_searched:     0,
-					limit_reached:      None,
-					skipped_oversized:  None,
+					matches:                  Vec::new(),
+					total_matches:            0,
+					files_with_matches:       0,
+					files_searched:           0,
+					limit_reached:            None,
+					skipped_oversized:        None,
+					ambiguous_encoding_files: None,
 				});
 			},
 		}
-		crate::encoding::transcode_search_strict(&mut buffer, &search_path, encoding.as_deref())?;
+		let transcode =
+			crate::encoding::transcode_search_strict(&mut buffer, &search_path, encoding.as_deref())?;
+		let single_ambiguous = transcode
+			.utf8_ambiguous
+			.then(|| vec![search_path.to_string_lossy().into_owned()]);
 		let bytes = &buffer;
 
 		if output_mode == OutputMode::FilesWithMatches && max_count.is_none() && offset == 0 {
@@ -2267,18 +2323,19 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				.map_err(|err| Error::from_reason(format!("Search failed: {err}")))?;
 			if !matched {
 				return Ok(GrepResult {
-					matches:            Vec::new(),
-					total_matches:      0,
-					files_with_matches: 0,
-					files_searched:     1,
-					limit_reached:      None,
-					skipped_oversized:  None,
+					matches:                  Vec::new(),
+					total_matches:            0,
+					files_with_matches:       0,
+					files_searched:           1,
+					limit_reached:            None,
+					skipped_oversized:        None,
+					ambiguous_encoding_files: single_ambiguous,
 				});
 			}
 
 			let path_string = search_path.to_string_lossy().into_owned();
 			return hand_off(stream, GrepResult {
-				matches:            vec![GrepMatch {
+				matches:                  vec![GrepMatch {
 					path:           path_string,
 					line_number:    0,
 					line:           String::new(),
@@ -2287,11 +2344,12 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					truncated:      None,
 					match_count:    None,
 				}],
-				total_matches:      1,
-				files_with_matches: 1,
-				files_searched:     1,
-				limit_reached:      None,
-				skipped_oversized:  None,
+				total_matches:            1,
+				files_with_matches:       1,
+				files_searched:           1,
+				limit_reached:            None,
+				skipped_oversized:        None,
+				ambiguous_encoding_files: single_ambiguous,
 			});
 		}
 
@@ -2311,12 +2369,13 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 
 		if search.match_count == 0 {
 			return Ok(GrepResult {
-				matches:            Vec::new(),
-				total_matches:      0,
-				files_with_matches: 0,
-				files_searched:     1,
-				limit_reached:      None,
-				skipped_oversized:  None,
+				matches:                  Vec::new(),
+				total_matches:            0,
+				files_with_matches:       0,
+				files_searched:           1,
+				limit_reached:            None,
+				skipped_oversized:        None,
+				ambiguous_encoding_files: single_ambiguous,
 			});
 		}
 
@@ -2359,6 +2418,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			files_searched: 1,
 			limit_reached: if limit_reached { Some(true) } else { None },
 			skipped_oversized: None,
+			ambiguous_encoding_files: single_ambiguous,
 		});
 	}
 
@@ -2392,7 +2452,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		encoding.as_ref(),
 		&ct,
 	)?;
-	let (results, skipped_oversized, files_searched) = results;
+	let (results, skipped_oversized, files_searched, ambiguous_files) = results;
 	let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
 		aggregate_parallel_results(results, params, files_searched);
 
@@ -2415,6 +2475,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		} else {
 			None
 		},
+		ambiguous_encoding_files: (!ambiguous_files.is_empty()).then_some(ambiguous_files),
 	})
 }
 

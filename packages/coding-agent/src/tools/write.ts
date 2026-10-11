@@ -38,7 +38,15 @@ import type { ToolSession } from "../sdk";
 import { hasActiveWriteBridge, routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
-import { assertSourceEncoding, encodeStrict, readTextWithPolicy, resolveWriteEncoding } from "../encoding/index";
+import {
+	assertSourceEncoding,
+	discoverEncodingPolicy,
+	encodeStrict,
+	readGbkAmbiguityDiagnostic,
+	unavailableEncodingDiagnostic,
+	readTextWithPolicy,
+	resolveWriteEncoding,
+} from "../encoding/index";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
@@ -947,6 +955,21 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// refused up front instead of letting the client land UTF-8 bytes.
 			const writeEncoding = resolveWriteEncoding(absolutePath, existing !== undefined);
 			assertSourceEncoding(absolutePath, cleanContent, writeEncoding);
+			// G4 ambiguity diagnostic: check existing file for UTF-8/GBK ambiguity before overwrite.
+			// Limited to existing regular files with GBK include/default policy (not explicit override),
+			// bounded by 4 MiB. Diagnostic only; write proceeds regardless.
+			let encodingAmbiguityNotice: string | undefined;
+			if (existing && existing.isFile() && target === undefined) {
+				const policy = discoverEncodingPolicy(this.session.cwd)?.policy;
+				const detailed = policy?.resolveDetailed(absolutePath, true);
+				if (detailed && detailed.encoding === "gbk" && !detailed.fromOverride) {
+					const diagnostic =
+						existing.size <= 4 * 1024 * 1024
+							? await readGbkAmbiguityDiagnostic(this.session.cwd, absolutePath)
+							: unavailableEncodingDiagnostic(absolutePath, "budget");
+					encodingAmbiguityNotice = diagnostic.notice;
+				}
+			}
 			let gbkBytes: Uint8Array | undefined;
 			if (writeEncoding === "gbk") {
 				if (await hasActiveWriteBridge(this.session, path, absolutePath)) {
@@ -980,6 +1003,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
 				}
+				if (encodingAmbiguityNotice) {
+					resultText += `\n\n[${encodingAmbiguityNotice}]`;
+				}
 				return {
 					content: [{ type: "text", text: resultText }],
 					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
@@ -1011,6 +1037,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			if (madeExecutable) {
 				resultText += `\n${EXECUTABLE_NOTICE}`;
+			}
+			if (encodingAmbiguityNotice) {
+				const formattedNotice = encodingAmbiguityNotice.startsWith("[")
+					? encodingAmbiguityNotice
+					: `[${encodingAmbiguityNotice}]`;
+				resultText += `\n\n${formattedNotice}`;
 			}
 			if (!diagnostics.diagnostics) {
 				return {

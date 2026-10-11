@@ -5,9 +5,11 @@ import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
 import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import type { EvalDisplayOutput } from "./types";
+import type { OutputDecodeProvenance } from "./output-decode";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
+	outputEncoding?: "utf8" | "gbk";
 	cwd: string;
 	sessionId: string;
 	sessionFile: string | undefined;
@@ -41,7 +43,7 @@ export interface ExecutorBackendExecOptions {
 }
 
 /** Result returned by a backend's execute(). */
-export interface ExecutorBackendResult {
+export interface ExecutorBackendResult extends OutputDecodeProvenance {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;

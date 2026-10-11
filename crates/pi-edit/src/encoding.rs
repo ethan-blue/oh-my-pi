@@ -123,6 +123,20 @@ pub fn read_validated_prefix(
 	Ok(prefix)
 }
 
+/// Whether BOM-free, non-ASCII `bytes` are also strictly valid UTF-8.
+///
+/// Such bytes carry a second legal reading whose text differs from the GBK
+/// one, so a GBK rule cannot tell the file's true encoding apart. Byte
+/// validity only: it never inspects decoded content, counts Chinese
+/// characters, or guesses. Pure-ASCII input decodes identically in both
+/// encodings and is never ambiguous; a UTF-8 BOM is a separate hard conflict
+/// callers reject before decoding.
+pub fn utf8_ambiguous_with_gbk(bytes: &[u8]) -> bool {
+	!bytes.starts_with(&UTF8_BOM)
+		&& bytes.iter().any(|byte| *byte > 0x7f)
+		&& std::str::from_utf8(bytes).is_ok()
+}
+
 /// Strictly encode `text` with `encoding`; `Err` carries the byte index and
 /// the first character GBK cannot represent. The result always re-decodes to
 /// `text` (verified before returning).
@@ -418,6 +432,19 @@ impl CompiledEncodingPolicy {
 	/// include glob. Within that scope the first override wins; otherwise new
 	/// files use `newFileEncoding` and existing files use the default.
 	pub fn resolve(&self, path: &Path, exists: bool) -> Option<TextEncoding> {
+		self
+			.resolve_detailed(path, exists)
+			.map(|resolved| resolved.encoding)
+	}
+
+	/// [`Self::resolve`] plus whether an explicit override entry selected the
+	/// encoding (as opposed to the include scope's default/new-file rule).
+	///
+	/// Ambiguity diagnostics key off this: an override is the user's explicit
+	/// per-path answer and is never re-flagged, while a broad include rule
+	/// sweeping in bytes that are also valid UTF-8 is exactly the case worth
+	/// reporting.
+	pub fn resolve_detailed(&self, path: &Path, exists: bool) -> Option<ResolvedEncoding> {
 		if !self.enabled {
 			return None;
 		}
@@ -435,17 +462,29 @@ impl CompiledEncodingPolicy {
 		{
 			return None;
 		}
-		self
+		if let Some((_, encoding)) = self
 			.overrides
 			.iter()
 			.find(|(glob, _)| glob.is_match(relative.as_ref()))
-			.map(|(_, encoding)| *encoding)
-			.or(if exists {
-				self.default_encoding
-			} else {
-				self.new_file_encoding
-			})
+		{
+			return Some(ResolvedEncoding { encoding: *encoding, from_override: true });
+		}
+		let encoding = if exists {
+			self.default_encoding
+		} else {
+			self.new_file_encoding
+		};
+		Some(ResolvedEncoding { encoding: encoding?, from_override: false })
 	}
+}
+
+/// One policy answer for a path, with what produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedEncoding {
+	pub encoding:      TextEncoding,
+	/// `true` when an explicit override entry matched; `false` when the
+	/// include scope's default/new-file rule did.
+	pub from_override: bool,
 }
 
 /// Compile one policy glob: gitignore-ish, `*` never crosses `/`, matched
@@ -773,5 +812,38 @@ mod tests {
 		let bytes = "中文".as_bytes();
 		assert_eq!(decode_strict(bytes, TextEncoding::Utf8).unwrap(), "中文");
 		assert_ne!(decode_strict(bytes, TextEncoding::Gbk).unwrap(), "中文");
+	}
+
+	// ── encoding ambiguity (byte validity only, never content heuristics) ───
+
+	#[test]
+	fn utf8_ambiguity_is_byte_validity_not_content_guessing() {
+		// No BOM, non-ASCII, valid UTF-8: the two encodings decode to different
+		// text, so a GBK rule cannot tell them apart.
+		assert!(utf8_ambiguous_with_gbk("目标 中文\n".as_bytes()));
+		// ASCII-only decodes identically in both encodings.
+		assert!(!utf8_ambiguous_with_gbk(b"int x = 0;\r\n"));
+		// BOM'd UTF-8 is a hard conflict callers reject before decoding.
+		assert!(!utf8_ambiguous_with_gbk(&[UTF8_BOM.as_slice(), "中文".as_bytes()].concat()));
+		// Actual GBK bytes are not valid UTF-8: only one legal reading.
+		assert!(!utf8_ambiguous_with_gbk(&decode_hex("d6d0cec4")));
+		// Invalid in both encodings: a decode failure, not an ambiguity.
+		assert!(!utf8_ambiguous_with_gbk(&decode_hex("d6d0ff")));
+		// Empty file has nothing to disambiguate.
+		assert!(!utf8_ambiguous_with_gbk(b""));
+	}
+
+	#[test]
+	fn resolve_detailed_reports_override_origin() {
+		let policy = compiled(POLICY);
+		assert_eq!(
+			policy.resolve_detailed(Path::new("/proj/src/main.c"), true),
+			Some(ResolvedEncoding { encoding: TextEncoding::Gbk, from_override: false })
+		);
+		assert_eq!(
+			policy.resolve_detailed(Path::new("/proj/src/vendor-utf8/x.c"), true),
+			Some(ResolvedEncoding { encoding: TextEncoding::Utf8, from_override: true })
+		);
+		assert_eq!(policy.resolve_detailed(Path::new("/proj/README.md"), true), None);
 	}
 }

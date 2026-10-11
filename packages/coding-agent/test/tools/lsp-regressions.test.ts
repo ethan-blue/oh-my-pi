@@ -397,6 +397,93 @@ describe("lsp regressions", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
+	for (const action of ["rename", "code_actions"] as const) {
+		it(`${action} renders ten GBK encoding notes and an omission count after real workspace edits`, async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-gbk-notes-");
+			try {
+				const cwd = tempDir.path();
+				await Bun.write(
+					path.join(cwd, ".omp", "encoding.json"),
+					JSON.stringify({
+						schemaVersion: 1,
+						enabled: true,
+						include: ["src/**"],
+						defaultEncoding: "gbk",
+						newFileEncoding: "gbk",
+						overrides: [],
+					}),
+				);
+				const files = Array.from({ length: 11 }, (_, i) => path.join(cwd, "src", `item${i}.c`));
+				for (const file of files) await Bun.write(file, new TextEncoder().encode("// 中文\nint x = 1;\n"));
+				const edit: WorkspaceEdit = {
+					changes: Object.fromEntries(
+						files.map(file => [
+							fileToUri(file),
+							[
+								{
+									range: { start: { line: 1, character: 8 }, end: { line: 1, character: 9 } },
+									newText: "2",
+								},
+							],
+						]),
+					),
+				};
+				const fakeServer = installFakeLsp((message, peer) => {
+					if (message.method === "initialize") {
+						peer.send({
+							jsonrpc: "2.0",
+							id: message.id,
+							result: { capabilities: { renameProvider: true, codeActionProvider: true } },
+						});
+						peer.send({
+							jsonrpc: "2.0",
+							method: "$/progress",
+							params: { token: "workspace", value: { kind: "begin" } },
+						});
+						peer.send({
+							jsonrpc: "2.0",
+							method: "$/progress",
+							params: { token: "workspace", value: { kind: "end" } },
+						});
+					} else if (message.method === "textDocument/rename")
+						peer.send({ jsonrpc: "2.0", id: message.id, result: edit });
+					else if (message.method === "textDocument/codeAction")
+						peer.send({ jsonrpc: "2.0", id: message.id, result: [{ title: "GBK diagnostic edit", edit }] });
+					else if (message.method === "shutdown") peer.send({ jsonrpc: "2.0", id: message.id, result: null });
+					else if (message.method === "exit") peer.exit(0);
+				});
+				const server: ServerConfig = {
+					command: "fake-lsp",
+					resolvedCommand: process.execPath,
+					fileTypes: [".c"],
+					rootMarkers: [],
+				};
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": server } });
+				const result = await new LspTool(makeLspSession(cwd)).execute("gbk-notes", {
+					action,
+					file: files[0],
+					line: 2,
+					symbol: "x",
+					new_name: "y",
+					query: "0",
+					apply: true,
+					timeout: 5,
+				});
+				const output = textResult(result);
+				expect(fakeServer.received.map(message => message.method)).toContain(
+					action === "rename" ? "textDocument/rename" : "textDocument/codeAction",
+				);
+				expect(result.details?.success).toBe(true);
+				expect(output.match(/also valid UTF-8/g)).toHaveLength(10);
+				expect(output).toContain("1 more encoding note(s) omitted");
+				for (const file of files)
+					expect(new TextDecoder().decode(await Bun.file(file).bytes())).toContain("int x = 2;");
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+	}
 
 	it("detects bracket-style glob patterns", () => {
 		expect(hasGlobPattern("src/[ab].ts")).toBe(true);

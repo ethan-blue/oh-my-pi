@@ -632,6 +632,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				// Files the GBK include rule decoded whose searched bytes are also
+				// strictly valid UTF-8 — surfaced as one diagnostic note.
+				const ambiguousEncodingFiles: string[] = [];
+				const collectAmbiguousFiles = (basePath: string, files: string[] | undefined): void => {
+					for (const file of files ?? []) {
+						const display = formatPathRelativeToCwd(resolveSearchResultPath(basePath, file), this.session.cwd);
+						if (!ambiguousEncodingFiles.includes(display)) ambiguousEncodingFiles.push(display);
+					}
+				};
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -673,6 +682,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								undefined,
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
+							collectAmbiguousFiles(target.basePath, targetResult.ambiguousEncodingFiles);
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
@@ -722,6 +732,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						collectAmbiguousFiles(searchPath, result.ambiguousEncodingFiles);
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
@@ -894,8 +905,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const missingPathsForNote = missingPaths.filter(p => !archiveUnreadablePaths.has(p));
 				const missingPathsNote =
 					missingPathsForNote.length > 0 ? `Skipped missing paths: ${missingPathsForNote.join(", ")}` : undefined;
+				const encodingAmbiguityNote =
+					ambiguousEncodingFiles.length > 0
+						? `GBK policy decoded ${ambiguousEncodingFiles.length} searched file(s) whose bytes are also valid UTF-8 — the two readings differ; add an explicit override (glob + "encoding": "utf8") in this project's .omp/encoding.json for any that is actually UTF-8: ${ambiguousEncodingFiles.join(", ")}`
+						: undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote]
+					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, encodingAmbiguityNote]
 						.filter((s): s is string => Boolean(s))
 						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {

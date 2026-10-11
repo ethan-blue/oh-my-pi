@@ -2589,7 +2589,15 @@ type BashResult struct {
 	ArtifactElidedBytes *int64                     `json:"artifactElidedBytes,omitempty"`
 	ArtifactError       map[string]json.RawMessage `json:"artifactError,omitempty"`
 	WorkingDir          *string                    `json:"workingDir,omitempty"`
-	Images              []ImageContent             `json:"images,omitempty"`
+	// The ONE encoding every settled output reader used (`utf8`, `gbk`, or `cp<N>`); null when readers disagreed (see outputEncodings) or any finished without a summary (see outputEncodingUnknownReaders).
+	OutputEncoding *string `json:"outputEncoding,omitempty"`
+	// Distinct encodings among the settled output readers, first-seen order (one per captured stream/chain segment); null when nothing was observed.
+	OutputEncodings []string `json:"outputEncodings,omitempty"`
+	// Undecodable byte sequences substituted across all settled readers (U+FFFD in the UTF-8/GBK modes, the Windows default character in the ACP mode); null while any reader is unobserved.
+	OutputReplacements *int64 `json:"outputReplacements,omitempty"`
+	// Captured output readers that finished WITHOUT a decode summary; null when every reader settled.
+	OutputEncodingUnknownReaders *int64         `json:"outputEncodingUnknownReaders,omitempty"`
+	Images                       []ImageContent `json:"images,omitempty"`
 }
 
 func (v *BashResult) UnmarshalJSON(data []byte) error {
@@ -2612,6 +2620,10 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactElidedBytes", &out.ArtifactElidedBytes)
 	d.optional("artifactError", &out.ArtifactError)
 	d.optional("workingDir", &out.WorkingDir)
+	d.optional("outputEncoding", &out.OutputEncoding)
+	d.optional("outputEncodings", &out.OutputEncodings)
+	d.optional("outputReplacements", &out.OutputReplacements)
+	d.optional("outputEncodingUnknownReaders", &out.OutputEncodingUnknownReaders)
 	d.optional("images", &out.Images)
 	if d.err != nil {
 		return d.err

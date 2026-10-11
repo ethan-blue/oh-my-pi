@@ -7094,6 +7094,7 @@ dependencies = [
  "brush-parser",
  "bytes",
  "clap",
+ "encoding_rs",
  "flume",
  "jiff",
  "libc",

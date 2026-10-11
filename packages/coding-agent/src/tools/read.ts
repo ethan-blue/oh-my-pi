@@ -2,7 +2,14 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
-import { decodeStrict, discoverEncodingPolicy, resolveFileEncoding } from "../encoding/index";
+import {
+	decodeStrict,
+	discoverEncodingPolicy,
+	gbkDecodeFailureUtf8Hint,
+	gbkUtf8AmbiguityNotice,
+	resolveFileEncoding,
+	unavailableEncodingDiagnostic,
+} from "../encoding/index";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -289,6 +296,9 @@ interface ReadLineWindow {
 	hasTrailingNewline: boolean;
 	/** False when `stopScanAfterCollect` cut the scan short — `totalFileLines` is then a lower bound. */
 	reachedEof: boolean;
+	/** The exact un-normalized raw bytes corresponding to the collected lines. */
+	collectedRawBytes?: Uint8Array;
+	rawDiagnosticIncompleteReason?: "budget" | "fragment";
 }
 
 function omittedRequestedLine(
@@ -321,6 +331,61 @@ function formatOmittedRequestedLineNotice(
  * encoded length differs from the bytes on disk, and those lengths decide both
  * the reported byte counts and where truncation lands.
  */
+function findGbkValidationFailureHint(
+	chunk: Uint8Array,
+	currentLineIndex: number,
+	filePath: string,
+	previousLineLength: number,
+	previousLineChunks: readonly Buffer[],
+	displayStart: number,
+	displayEnd: number,
+): string | undefined {
+	let start = 0;
+	let lineIdx = currentLineIndex;
+	let incompleteReason: "budget" | "fragment" | undefined;
+	while (start < chunk.length) {
+		const newlineAt = chunk.indexOf(0x0a, start);
+		if (newlineAt === -1) {
+			// Incomplete line fragment at the end of the chunk: fragments must not produce definitive proof.
+			incompleteReason ??= "fragment";
+			break;
+		}
+		const segment = chunk.subarray(start, newlineAt + 1);
+		const prefixLength = start === 0 ? previousLineLength : 0;
+		// The streaming decoder carries the preceding GBK lead. Its chunk suffix
+		// is never independent evidence about a whole line.
+		if (prefixLength > 0 && previousLineChunks.reduce((length, part) => length + part.length, 0) !== prefixLength) {
+			incompleteReason ??= "fragment";
+			start = newlineAt + 1;
+			lineIdx++;
+			continue;
+		}
+		if (prefixLength + segment.length > SNAPSHOT_MAX_BYTES) {
+			incompleteReason = "budget";
+			start = newlineAt + 1;
+			lineIdx++;
+			continue;
+		}
+		const lineBytes =
+			prefixLength > 0 ? Buffer.concat([...previousLineChunks, segment], prefixLength + segment.length) : segment;
+		try {
+			decodeStrict(lineBytes, "gbk");
+		} catch {
+			const hint = gbkDecodeFailureUtf8Hint(filePath, lineBytes, {
+				scope: "window",
+				displayed: lineIdx >= displayStart && lineIdx < displayEnd,
+				window: { startLine: lineIdx + 1, lineCount: 1 },
+			});
+			if (hint) return hint;
+		}
+		lineIdx++;
+		start = newlineAt + 1;
+	}
+	return incompleteReason
+		? unavailableEncodingDiagnostic(filePath, incompleteReason, { scope: "window" }).notice
+		: undefined;
+}
+
 function collectLineWindowFromBuffer(
 	file: BufferedFileText,
 	startLine: number,
@@ -359,6 +424,8 @@ function collectLineWindowFromBuffer(
 
 	let doneCollecting = false;
 	let selectedLinesSeen = 0;
+	let windowStartByte = -1;
+	let windowEndByte = -1;
 	for (let index = startLine; index < totalFileLines; index++) {
 		const newlineAt = bytes.indexOf(LF_BYTE, lineStart);
 		const lineEnd = newlineAt === -1 ? bytes.length : newlineAt;
@@ -389,6 +456,8 @@ function collectLineWindowFromBuffer(
 				window.byteLimitLine = { index, byteLength: lineByteLength };
 				doneCollecting = true;
 			} else {
+				if (windowStartByte === -1) windowStartByte = lineStart;
+				windowEndByte = lineEnd;
 				window.lines.push(rawSegments[index] ?? "");
 				window.collectedBytes += separatorBytes + lineByteLength;
 				window.firstLineByteLength ??= lineByteLength;
@@ -405,6 +474,9 @@ function collectLineWindowFromBuffer(
 
 		if (doneCollecting && selectedLinesSeen >= selectedLineLimit) break;
 		lineStart = lineEnd + 1;
+	}
+	if (windowStartByte !== -1 && windowEndByte >= windowStartByte) {
+		window.collectedRawBytes = bytes.subarray(windowStartByte, windowEndByte);
 	}
 	return window;
 }
@@ -451,6 +523,9 @@ async function streamLinesFromFile(
 	const { includeTerminalNewline = false, stopScanAfterCollect = false, seek, encoding } = options;
 	const bufferChunk = Buffer.allocUnsafe(READ_CHUNK_SIZE);
 	const collectedLines: string[] = [];
+	const collectedRawChunks: Buffer[] = [];
+	let collectedRawBytesLength = 0;
+	let rawDiagnosticIncompleteReason: "budget" | "fragment" | undefined;
 	let lineIndex = seek?.line ?? 0;
 	let position = seek?.byte ?? 0;
 	let collectedBytes = 0;
@@ -490,17 +565,24 @@ async function streamLinesFromFile(
 		}
 	};
 
-	const decodeLine = (): string => {
+	const decodeLine = (whole: Buffer): string => {
 		if (currentLineLength === 0) return "";
 		// LF/CR never occur inside a GBK double-byte sequence, so the byte-level
 		// line split above never cut a character in half; strict decoding of the
 		// whole line either succeeds or reports the offending offset.
 		if (encoding === "gbk") {
-			const whole =
-				currentLineChunks.length === 0
-					? (pendingSegment ?? Buffer.alloc(0))
-					: Buffer.concat([...currentLineChunks, ...(pendingSegment ? [pendingSegment] : [])], currentLineLength);
-			return decodeStrict(whole, "gbk");
+			try {
+				return decodeStrict(whole, "gbk");
+			} catch (error) {
+				const hint = gbkDecodeFailureUtf8Hint(filePath, whole, {
+					scope: "window",
+					window: { startLine: lineIndex + 1, lineCount: 1 },
+				});
+				if (hint) {
+					throw new ToolError(hint);
+				}
+				throw new Error(String(error));
+			}
 		}
 		if (currentLineChunks.length === 0) return pendingSegment ? decodeStrict(pendingSegment, "utf8") : "";
 		if (pendingSegment) currentLineChunks.push(pendingSegment);
@@ -550,8 +632,27 @@ async function streamLinesFromFile(
 				byteLimitLine = { index: lineIndex, byteLength: currentLineLength };
 				doneCollecting = true;
 			} else {
-				const lineText = decodeLine();
+				const whole =
+					currentLineChunks.length === 0
+						? (pendingSegment ?? Buffer.alloc(0))
+						: Buffer.concat(
+								[...currentLineChunks, ...(pendingSegment ? [pendingSegment] : [])],
+								currentLineLength,
+							);
+				const lineText = decodeLine(whole);
 				collectedLines.push(lineText);
+				if (encoding === "gbk" && !rawDiagnosticIncompleteReason) {
+					const diagnosticBytes = collectedRawBytesLength + separatorBytes + whole.length;
+					if (diagnosticBytes > SNAPSHOT_MAX_BYTES) {
+						rawDiagnosticIncompleteReason = "budget";
+						collectedRawChunks.length = 0;
+						collectedRawBytesLength = 0;
+					} else {
+						if (separatorBytes) collectedRawChunks.push(Buffer.from([0x0a]));
+						collectedRawChunks.push(Buffer.from(whole));
+						collectedRawBytesLength = diagnosticBytes;
+					}
+				}
 				collectedBytes += separatorBytes + currentLineLength;
 				if (firstLineByteLength === undefined) {
 					firstLineByteLength = currentLineLength;
@@ -596,7 +697,27 @@ async function streamLinesFromFile(
 
 			sawAnyByte = true;
 			const chunk = bufferChunk.subarray(0, bytesRead);
-			validationDecoder.decode(chunk, { stream: true });
+			try {
+				validationDecoder.decode(chunk, { stream: true });
+			} catch (decodeError) {
+				if (encoding === "gbk") {
+					const hint = findGbkValidationFailureHint(
+						chunk,
+						lineIndex,
+						filePath,
+						currentLineLength,
+						currentLineChunks,
+						startLine,
+						startLine + maxLinesToCollect,
+					);
+					if (hint) {
+						throw new ToolError(
+							`${String(decodeError)}. ${hint}; text reads require valid GBK; do not rewrite the source to recover a read.`,
+						);
+					}
+				}
+				throw decodeError;
+			}
 			endedWithNewline = chunk[bytesRead - 1] === 0x0a;
 
 			// Once collection and selected-line accounting are both finished, the
@@ -643,8 +764,13 @@ async function streamLinesFromFile(
 		}
 		if (reachedEof) validationDecoder.decode();
 	} catch (error) {
+		if (error instanceof ToolError) throw error;
+		const incomplete =
+			encoding === "gbk" && error instanceof TypeError
+				? unavailableEncodingDiagnostic(filePath, "fragment", { scope: "window" }).notice
+				: undefined;
 		throw new ToolError(
-			`${filePath}: ${String(error)}. Text reads (including :raw) require valid ${encoding ?? "UTF-8"}. Configure this project's .omp/encoding.json with explicit include and encoding overrides; do not rewrite the source to recover a read.`,
+			`${filePath}: ${String(error)}. Text reads (including :raw) require valid ${encoding ?? "UTF-8"}. Configure this project's .omp/encoding.json with explicit include and encoding overrides; do not rewrite the source to recover a read.${incomplete ? ` ${incomplete}` : ""}`,
 		);
 	} finally {
 		if (fileHandle) {
@@ -667,6 +793,13 @@ async function streamLinesFromFile(
 		firstLinePreview = { text, bytes: Buffer.byteLength(text, "utf8") };
 	}
 
+	if (encoding === "gbk" && collectedLines.length === 0 && firstLinePreview)
+		rawDiagnosticIncompleteReason ??= "fragment";
+	const collectedRawBytes = rawDiagnosticIncompleteReason
+		? undefined
+		: collectedRawChunks.length === 0
+			? new Uint8Array(0)
+			: Buffer.concat(collectedRawChunks, collectedRawBytesLength);
 	return {
 		lines: collectedLines,
 		totalFileLines: lineIndex,
@@ -678,6 +811,8 @@ async function streamLinesFromFile(
 		firstLineByteLength,
 		reachedEof,
 		hasTrailingNewline: reachedEof && endedWithNewline,
+		collectedRawBytes,
+		rawDiagnosticIncompleteReason,
 	};
 }
 
@@ -1565,8 +1700,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						});
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
+				if (fileEncoding === "gbk" && (window.collectedRawBytes?.length || window.rawDiagnosticIncompleteReason)) {
+					try {
+						const note = gbkUtf8AmbiguityNotice(
+							this.session.cwd,
+							absolutePath,
+							window.collectedRawBytes ?? new Uint8Array(),
+							{
+								scope: "window",
+								complete: !window.rawDiagnosticIncompleteReason,
+								incompleteReason: window.rawDiagnosticIncompleteReason,
+								window: { startLine: range.startLine, lineCount: collectedLines.length },
+							},
+						);
+						if (note && !notices.some(n => n.includes(note))) {
+							notices.push(`[${note}]`);
+						}
+					} catch {
+						// Diagnostic only
+					}
+				}
 			}
-
 			if (rangeStart >= totalFileLines) {
 				const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
 				notices.push(`[Range ${bound} is beyond end of file (${totalFileLines} lines total); skipped]`);
@@ -2029,6 +2183,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// unbuffered files keep one centralized 256KB peek regardless of
 		// extension, since only magic bytes — never the name — decide.
 		const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
+		// G4 diagnostic, set on the plain-text path: a buffered GBK-managed file
+		// whose bytes are also strictly valid UTF-8 decodes per policy, but the
+		// reader must know both readings exist. Appended to the result below.
+		let gbkAmbiguityNotice: string | undefined;
 		const imageHeader = wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
 		const imageMetadata = isRawSelector(parsed)
 			? null
@@ -2158,6 +2316,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					);
 				}
 			}
+			// G4 diagnostic: a buffered (≤4 MiB) GBK-managed file whose bytes are
+			// also valid UTF-8 decodes per policy but the reader must know both
+			// readings exist. Skipped for override-resolved paths and streamed
+			// files (no whole-file bytes to validate).
+			gbkAmbiguityNotice =
+				managedGbk && wholeFileBytes
+					? gbkUtf8AmbiguityNotice(this.session.cwd, absolutePath, wholeFileBytes)
+					: undefined;
 			// Binary sniff before any UTF-8 text materialization. A binary file
 			// (font, object, archive, packed blob) decodes to NUL/control bytes and
 			// U+FFFD mojibake that corrupts the terminal and burns context. Images,
@@ -2208,8 +2374,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					? deriveBufferedFileText(wholeFileBytes, managedGbk ? "gbk" : undefined)
 					: undefined;
 			} catch (error) {
+				// Bytes that are valid UTF-8 prove the file cannot be GBK at all;
+				// prefer that definitive hint over the generic guidance.
+				const utf8Proof =
+					managedGbk && wholeFileBytes ? gbkDecodeFailureUtf8Hint(absolutePath, wholeFileBytes) : undefined;
 				throw new ToolError(
-					`${resolvedDisplayPath}: ${String(error)}. ${managedGbk ? "Check the GBK policy; use an explicit utf8 override if this file is UTF-8." : this.encodingPolicyGapHint(absolutePath)}`,
+					utf8Proof ??
+						`${resolvedDisplayPath}: ${String(error)}. ${managedGbk ? "Check the GBK policy; use an explicit utf8 override if this file is UTF-8." : this.encodingPolicyGapHint(absolutePath)}`,
 				);
 			}
 			if (buffered) onBufferedFile?.(buffered.bytes);
@@ -2394,6 +2565,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						reachedEof,
 						hasTrailingNewline,
 					} = lineWindow;
+					if (
+						managedGbk &&
+						!gbkAmbiguityNotice &&
+						(lineWindow.collectedRawBytes?.length || lineWindow.rawDiagnosticIncompleteReason)
+					) {
+						try {
+							gbkAmbiguityNotice = gbkUtf8AmbiguityNotice(
+								this.session.cwd,
+								absolutePath,
+								lineWindow.collectedRawBytes ?? new Uint8Array(),
+								{
+									scope: "window",
+									complete: !lineWindow.rawDiagnosticIncompleteReason,
+									incompleteReason: lineWindow.rawDiagnosticIncompleteReason,
+									window: { startLine: startLine + 1, lineCount: collectedLines.length },
+								},
+							);
+						} catch {
+							// Diagnostic only
+						}
+					}
 
 					// Check if offset is out of bounds - return graceful message instead of throwing
 					if (requestedStart >= totalFileLines) {
@@ -2719,6 +2911,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		details.fileSize = fileSize;
 		markMarkdownContentType(this.session, details, renderAbsolutePath);
+		if (gbkAmbiguityNotice) {
+			// Model-visible: both selector modes (including :raw) flow their
+			// text through `content`; a notice on the first text block reaches
+			// every rendering of this read.
+			const firstText = content.find((c): c is TextContent => c.type === "text");
+			if (firstText) {
+				firstText.text += `\n\n[${gbkAmbiguityNotice}]`;
+			} else {
+				content = [{ type: "text", text: `[${gbkAmbiguityNotice}]` }, ...content];
+			}
+		}
 		if (suffixResolution) {
 			details.suffixResolution = suffixResolution;
 			// Inline resolution notice into first text block so the model sees the actual path

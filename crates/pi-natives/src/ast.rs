@@ -242,20 +242,25 @@ fn retained_to_find_match(retained: RetainedAstFindMatch) -> AstFindMatch {
 #[napi(object)]
 pub struct AstFindResult {
 	/// Page of matches after sort, offset, and limit.
-	pub matches:            Vec<AstFindMatch>,
+	pub matches: Vec<AstFindMatch>,
 	/// Total matches found before paging (can exceed `matches.length`).
-	pub total_matches:      u32,
+	pub total_matches: u32,
 	/// Distinct files that contained at least one match.
 	pub files_with_matches: u32,
 	/// Files examined for the query.
-	pub files_searched:     u32,
+	pub files_searched: u32,
 	/// True when results were truncated by `limit`.
-	pub limit_reached:      bool,
+	pub limit_reached: bool,
 	/// Non-fatal parse or pattern errors collected during the run.
-	pub parse_errors:       Option<Vec<String>>,
+	pub parse_errors: Option<Vec<String>>,
 	/// Languages whose on-demand grammar is not installed; their files were
-	/// skipped (see `wasmGrammarFor`).
-	pub missing_grammars:   Option<Vec<String>>,
+	pub missing_grammars: Option<Vec<String>>,
+	/// Files decoded as GBK whose bytes are also strictly valid UTF-8.
+	pub ambiguous_encoding_files: Option<Vec<String>>,
+	/// True when additional ambiguous files were detected beyond the cap.
+	pub ambiguous_encoding_files_truncated: Option<bool>,
+	pub encoding_diagnostics: Option<Vec<crate::encoding::SourceEncodingDiagnostic>>,
+	pub encoding_diagnostics_truncated: Option<bool>,
 }
 
 /// Options for `astMatch`: run ast-grep patterns against an in-memory source
@@ -375,25 +380,32 @@ pub struct AstReplaceFileChange {
 #[napi(object)]
 pub struct AstReplaceResult {
 	/// Individual replacement records (may be large).
-	pub changes:            Vec<AstReplaceChange>,
+	pub changes: Vec<AstReplaceChange>,
 	/// Replacement counts grouped by file.
-	pub file_changes:       Vec<AstReplaceFileChange>,
+	pub file_changes: Vec<AstReplaceFileChange>,
 	/// Total replacements applied or previewed.
 	pub total_replacements: u32,
 	/// Files that had at least one replacement.
-	pub files_touched:      u32,
+	pub files_touched: u32,
 	/// Files considered for rewriting.
-	pub files_searched:     u32,
+	pub files_searched: u32,
 	/// False when `dryRun` prevented writing.
-	pub applied:            bool,
+	pub applied: bool,
 	/// True when limits stopped further replacements.
-	pub limit_reached:      bool,
+	pub limit_reached: bool,
 	/// Parse or pattern errors when not failing the whole operation.
-	pub parse_errors:       Option<Vec<String>>,
+	pub parse_errors: Option<Vec<String>>,
 	/// Languages whose on-demand grammar is not installed; their files were
-	/// skipped (see `wasmGrammarFor`).
-	pub missing_grammars:   Option<Vec<String>>,
+	pub missing_grammars: Option<Vec<String>>,
+	/// Files decoded as GBK whose bytes are also strictly valid UTF-8.
+	pub ambiguous_encoding_files: Option<Vec<String>>,
+	/// True when additional ambiguous files were detected beyond the cap.
+	pub ambiguous_encoding_files_truncated: Option<bool>,
+	pub encoding_diagnostics: Option<Vec<crate::encoding::SourceEncodingDiagnostic>>,
+	pub encoding_diagnostics_truncated: Option<bool>,
 }
+
+const AMBIGUOUS_FILES_CAP: usize = 10;
 
 struct FileCandidate {
 	absolute_path: PathBuf,
@@ -416,22 +428,20 @@ fn read_candidate_source(
 	fs: &BlockingFs,
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 	path: &std::path::Path,
-) -> std::io::Result<String> {
-	let managed = encoding
-		.as_ref()
-		.and_then(|policy| policy.resolve(path, true));
-	if managed != Some(pi_edit::encoding::TextEncoding::Gbk) {
-		return fs.read_to_string(path);
-	}
+) -> std::io::Result<(String, bool, Option<crate::encoding::SourceEncodingDiagnostic>)> {
 	let bytes = fs.read(path)?;
-	pi_edit::encoding::decode_strict(&bytes, pi_edit::encoding::TextEncoding::Gbk).map_err(
-		|offset| {
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				format!("invalid GBK byte sequence at offset {offset}"),
+	let policy = encoding.map(|p| p.as_ref());
+	crate::encoding::decode_source_strict(&bytes, path, policy, None)
+		.map(|decoded| {
+			(
+				decoded.text,
+				decoded.utf8_ambiguous,
+				decoded
+					.diagnostic
+					.into_notice(path.to_string_lossy().into_owned()),
 			)
-		},
-	)
+		})
+		.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
 fn to_u32(value: usize) -> u32 {
@@ -755,6 +765,10 @@ pub fn ast_grep<'env>(
 		let retained_capacity = retained_find_capacity(normalized_offset, normalized_limit);
 		let mut retained_matches = BinaryHeap::new();
 		let mut parse_errors = Vec::new();
+		let mut ambiguous_files = Vec::new();
+		let mut ambiguous_files_truncated = false;
+		let mut encoding_diagnostics = Vec::new();
+		let mut encoding_diagnostics_truncated = false;
 		let mut total_matches = 0u32;
 		let mut match_sequence = 0u64;
 		let mut files_with_matches = BTreeSet::new();
@@ -774,17 +788,33 @@ pub fn ast_grep<'env>(
 				continue;
 			};
 			let lang_key = language.canonical_name();
-			let source = match read_candidate_source(&fs, encoding.as_ref(), &candidate.absolute_path)
-			{
-				Ok(source) => source,
-				Err(err) => {
-					for compiled in &compiled_patterns {
-						parse_errors
-							.push(format!("{}: {}: {err}", compiled.pattern, candidate.display_path));
-					}
-					continue;
-				},
-			};
+			let (source, utf8_ambiguous, diagnostic) =
+				match read_candidate_source(&fs, encoding.as_ref(), &candidate.absolute_path) {
+					Ok(res) => res,
+					Err(err) => {
+						for compiled in &compiled_patterns {
+							parse_errors
+								.push(format!("{}: {}: {err}", compiled.pattern, candidate.display_path));
+						}
+						continue;
+					},
+				};
+			if let Some(diagnostic) = diagnostic {
+				if encoding_diagnostics.len() < AMBIGUOUS_FILES_CAP {
+					encoding_diagnostics.push(diagnostic);
+				} else {
+					encoding_diagnostics_truncated = true;
+				}
+			}
+			if utf8_ambiguous {
+				if ambiguous_files.contains(&candidate.display_path) {
+					// already recorded
+				} else if ambiguous_files.len() < AMBIGUOUS_FILES_CAP {
+					ambiguous_files.push(candidate.display_path.clone());
+				} else {
+					ambiguous_files_truncated = true;
+				}
+			}
 
 			let mut runnable_patterns: Vec<(&str, &Pattern)> = Vec::new();
 			for compiled in &compiled_patterns {
@@ -869,6 +899,10 @@ pub fn ast_grep<'env>(
 			limit_reached,
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 			missing_grammars,
+			ambiguous_encoding_files: (!ambiguous_files.is_empty()).then_some(ambiguous_files),
+			ambiguous_encoding_files_truncated: ambiguous_files_truncated.then_some(true),
+			encoding_diagnostics: (!encoding_diagnostics.is_empty()).then_some(encoding_diagnostics),
+			encoding_diagnostics_truncated: encoding_diagnostics_truncated.then_some(true),
 		})
 	})
 }
@@ -1133,10 +1167,18 @@ fn ast_edit_blocking(
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 			missing_grammars,
 			changes: vec![],
+			ambiguous_encoding_files: None,
+			ambiguous_encoding_files_truncated: None,
+			encoding_diagnostics: None,
+			encoding_diagnostics_truncated: None,
 		});
 	}
 
 	let mut changes = Vec::new();
+	let mut ambiguous_files = Vec::new();
+	let mut ambiguous_files_truncated = false;
+	let mut encoding_diagnostics = Vec::new();
+	let mut encoding_diagnostics_truncated = false;
 	let mut file_counts: BTreeMap<String, u32> = BTreeMap::new();
 	let mut files_touched = 0u32;
 	let mut limit_reached = false;
@@ -1175,16 +1217,33 @@ fn ast_edit_blocking(
 			continue;
 		}
 
-		let source = match read_candidate_source(fs, encoding, &candidate.absolute_path) {
-			Ok(source) => source,
-			Err(err) => {
-				if fail_on_parse_error {
-					return Err(Error::from_reason(format!("{}: {err}", candidate.display_path)));
-				}
-				parse_errors.push(format!("{}: {err}", candidate.display_path));
-				continue;
-			},
-		};
+		let (source, utf8_ambiguous, diagnostic) =
+			match read_candidate_source(fs, encoding, &candidate.absolute_path) {
+				Ok(res) => res,
+				Err(err) => {
+					if fail_on_parse_error {
+						return Err(Error::from_reason(format!("{}: {err}", candidate.display_path)));
+					}
+					parse_errors.push(format!("{}: {err}", candidate.display_path));
+					continue;
+				},
+			};
+		if let Some(diagnostic) = diagnostic {
+			if encoding_diagnostics.len() < AMBIGUOUS_FILES_CAP {
+				encoding_diagnostics.push(diagnostic);
+			} else {
+				encoding_diagnostics_truncated = true;
+			}
+		}
+		if utf8_ambiguous {
+			if ambiguous_files.contains(&candidate.display_path) {
+				// already recorded
+			} else if ambiguous_files.len() < AMBIGUOUS_FILES_CAP {
+				ambiguous_files.push(candidate.display_path.clone());
+			} else {
+				ambiguous_files_truncated = true;
+			}
+		}
 
 		let ast = language.ast_grep(&source);
 		if ast.root().dfs().any(|node| node.is_error()) {
@@ -1331,6 +1390,10 @@ fn ast_edit_blocking(
 		parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 		missing_grammars,
 		changes,
+		ambiguous_encoding_files: (!ambiguous_files.is_empty()).then_some(ambiguous_files),
+		ambiguous_encoding_files_truncated: ambiguous_files_truncated.then_some(true),
+		encoding_diagnostics: (!encoding_diagnostics.is_empty()).then_some(encoding_diagnostics),
+		encoding_diagnostics_truncated: encoding_diagnostics_truncated.then_some(true),
 	})
 }
 

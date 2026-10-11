@@ -149,6 +149,22 @@ export const stateDefs = {
 		"artifactElidedBytes?": "number.integer",
 		"artifactError?": JSON_OBJECT,
 		"workingDir?": "string",
+		"outputEncoding?": doc(
+			"string",
+			"The ONE encoding every settled output reader used (`utf8`, `gbk`, or `cp<N>`); null when readers disagreed (see outputEncodings) or any finished without a summary (see outputEncodingUnknownReaders).",
+		),
+		"outputEncodings?": doc(
+			"string[]",
+			"Distinct encodings among the settled output readers, first-seen order (one per captured stream/chain segment); null when nothing was observed.",
+		),
+		"outputReplacements?": doc(
+			"number.integer",
+			"Undecodable byte sequences substituted across all settled readers (U+FFFD in the UTF-8/GBK modes, the Windows default character in the ACP mode); null while any reader is unobserved.",
+		),
+		"outputEncodingUnknownReaders?": doc(
+			"number.integer",
+			"Captured output readers that finished WITHOUT a decode summary; null when every reader settled.",
+		),
 		"images?": "ImageContent[]",
 	},
 	FastModeResult: { enabled: "boolean", active: "boolean" },

@@ -62,6 +62,10 @@ export interface EvalStatusEvent {
 
 /** Per-cell execution result for transcript rendering. */
 export interface EvalCellResult {
+	outputEncoding?: string;
+	outputReplacements?: number;
+	outputEncodings?: string[];
+	outputEncodingUnknownReaders?: number;
 	index: number;
 	title?: string;
 	code: string;

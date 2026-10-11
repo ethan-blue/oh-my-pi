@@ -9,13 +9,22 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
-import { assertStableGbkBytes, discoverEncodingPolicy, resolveWriteEncoding } from "../encoding/index";
+import {
+	assertStableGbkBytes,
+	discoverEncodingPolicy,
+	readTextWithPolicy,
+	formatAstEncodingNotes,
+	type AstEncodingDiagnostics,
+	type DiscoveredEncodingPolicy,
+	mergeAstDiagnosticEvidence,
+	resolveFileEncoding,
+} from "../encoding/index";
 import { assertProtectedConfigMutation } from "./protected-mode";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
-import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
@@ -64,7 +73,7 @@ interface AstEditCallOptions {
 	encodingPolicy?: { root: string; json: string };
 }
 
-interface AstEditAggregatedResult {
+interface AstEditAggregatedResult extends AstEncodingDiagnostics {
 	changes: AstReplaceChange[];
 	fileChanges: AstReplaceFileChange[];
 	totalReplacements: number;
@@ -74,6 +83,8 @@ interface AstEditAggregatedResult {
 	limitReached: boolean;
 	parseErrors?: string[];
 	missingGrammars?: string[];
+	ambiguousEncodingFiles?: string[];
+	ambiguousEncodingFilesTruncated?: boolean;
 }
 
 async function runAstEditTargets(
@@ -85,6 +96,9 @@ async function runAstEditTargets(
 	const fileCounts = new Map<string, number>();
 	const parseErrors: string[] = [];
 	const missingGrammars = new Set<string>();
+	const encodingEvidence: AstEncodingDiagnostics = {};
+	const ambiguousEncodingFiles: string[] = [];
+	let ambiguousEncodingFilesTruncated = false;
 	let totalReplacements = 0;
 	let filesSearched = 0;
 	let limitReached = false;
@@ -106,7 +120,24 @@ async function runAstEditTargets(
 		limitReached = limitReached || targetResult.limitReached;
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
+		mergeAstDiagnosticEvidence(encodingEvidence, targetResult, file =>
+			relativeSearchResultPath(commonBasePath, resolveSearchResultPath(target.basePath, file)),
+		);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
+		if (targetResult.ambiguousEncodingFilesTruncated) {
+			ambiguousEncodingFilesTruncated = true;
+		}
+		for (const file of targetResult.ambiguousEncodingFiles ?? []) {
+			const absolute = resolveSearchResultPath(target.basePath, file);
+			const rebased = relativeSearchResultPath(commonBasePath, absolute);
+			if (ambiguousEncodingFiles.includes(rebased)) {
+				// already present
+			} else if (ambiguousEncodingFiles.length < 10) {
+				ambiguousEncodingFiles.push(rebased);
+			} else {
+				ambiguousEncodingFilesTruncated = true;
+			}
+		}
 		for (const change of targetResult.changes) {
 			const absolute = resolveSearchResultPath(target.basePath, change.path);
 			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
@@ -131,6 +162,9 @@ async function runAstEditTargets(
 		limitReached,
 		parseErrors: parseErrors.length > 0 ? parseErrors : undefined,
 		missingGrammars: missingGrammars.size > 0 ? [...missingGrammars] : undefined,
+		ambiguousEncodingFiles: ambiguousEncodingFiles.length > 0 ? ambiguousEncodingFiles : undefined,
+		ambiguousEncodingFilesTruncated: ambiguousEncodingFilesTruncated ? true : undefined,
+		...encodingEvidence,
 	};
 }
 
@@ -309,20 +343,24 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				}),
 			);
 			const grammarNote = result.missingGrammars?.length ? missingGrammarsNote(result.missingGrammars) : undefined;
-
+			const encodingAmbiguityNote = formatAstEncodingNotes(result);
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
-			const validateChanges = async (preview: AstEditAggregatedResult) => {
+			const validateChanges = async (
+				preview: AstEditAggregatedResult,
+				context: ResolveContext,
+				policy: DiscoveredEncodingPolicy | undefined,
+			) => {
 				for (const change of preview.fileChanges) {
-					const target = await resultSnapshotPath(formatPath(change.path), this.session.cwd, resolveContext);
+					const target = await resultSnapshotPath(formatPath(change.path), this.session.cwd, context);
 					if (!target) continue; // Non-local URL backends retain their own write contract.
 					assertProtectedConfigMutation(target);
-					if (resolveWriteEncoding(target, true) === "gbk")
+					if (resolveFileEncoding(this.session.cwd, target, true, policy ?? null) === "gbk")
 						assertStableGbkBytes(await Bun.file(target).bytes(), target);
 				}
 			};
-			await validateChanges(result);
+			await validateChanges(result, resolveContext, discoveredEncoding);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
@@ -360,7 +398,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
-				return toolResult(baseDetails).text(`No replacements made${parseMessage}${grammarMessage}`).done();
+				const ambiguityMessage = encodingAmbiguityNote ? `\n\n[${encodingAmbiguityNote}]` : "";
+				return toolResult(baseDetails)
+					.text(`No replacements made${parseMessage}${grammarMessage}${ambiguityMessage}`)
+					.done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
@@ -372,7 +413,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
 					if (snapshotPath === undefined) continue;
 					try {
-						const fullText = normalizeToLF(await Bun.file(snapshotPath).text());
+						const bytes = await Bun.file(snapshotPath).bytes();
+						const fullText = normalizeToLF(
+							readTextWithPolicy(this.session.cwd, snapshotPath, bytes, true, discoveredEncoding ?? null).text,
+						);
 						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
@@ -452,7 +496,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (grammarNote) {
 				outputLines.push("", grammarNote);
 			}
-
+			if (encodingAmbiguityNote) {
+				outputLines.push("", `[${encodingAmbiguityNote}]`);
+			}
 			// Register pending action so `resolve` can apply or discard these previewed changes
 			if (!result.applied && result.totalReplacements > 0) {
 				const previewReplacementPlural = result.totalReplacements !== 1 ? "s" : "";
@@ -461,23 +507,28 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
-						// The apply outlives the preview call: its filesystem carries no signal.
+						// The apply outlives the preview call: its filesystem carries no signal,
+						// and its encoding policy must be re-discovered fresh from disk.
 						const applyContext = sessionResolveContext(this.session);
+						const discoveredEncoding = discoverEncodingPolicy(this.session.cwd);
+						const applyEncodingPolicy = discoveredEncoding
+							? { root: discoveredEncoding.root, json: discoveredEncoding.json }
+							: undefined;
 						const freshPreview = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: true,
 							maxFiles,
 							failOnParseError: false,
-							encodingPolicy,
+							encodingPolicy: applyEncodingPolicy,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
-						await validateChanges(freshPreview);
+						await validateChanges(freshPreview, applyContext, discoveredEncoding);
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,
-							encodingPolicy,
+							encodingPolicy: applyEncodingPolicy,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
@@ -506,7 +557,11 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
 								if (appliedPath === undefined) continue;
 								try {
-									const fullText = normalizeToLF(await Bun.file(appliedPath).text());
+									const bytes = await Bun.file(appliedPath).bytes();
+									const fullText = normalizeToLF(
+										readTextWithPolicy(this.session.cwd, appliedPath, bytes, true, discoveredEncoding ?? null)
+											.text,
+									);
 									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
 									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
 								} catch {
@@ -540,6 +595,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							appliedFileList.some(
 								filePath => fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
 							);
+						const appliedAmbiguityNote = formatAstEncodingNotes(applyResult);
 						if (stalePreview) {
 							const staleText =
 								applyResult.totalReplacements === 0
@@ -549,11 +605,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 										: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
 							const staleWithTags =
 								freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
-							return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
+							const staleWithNotes = appliedAmbiguityNote
+								? `${staleWithTags}\n\n[${appliedAmbiguityNote}]`
+								: staleWithTags;
+							return { ...toolResult(appliedDetails).text(staleWithNotes).done(), isError: true };
 						}
 						const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
 						const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
-						const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+						let appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+						if (appliedAmbiguityNote) {
+							appliedText += `\n\n[${appliedAmbiguityNote}]`;
+						}
 						const text = freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
 						return toolResult(appliedDetails).text(text).done();
 					},

@@ -13,8 +13,10 @@ import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
 
 import { cfgEvalAutoProvision } from "../settings";
+import { type OutputDecodeProvenance, RawOutputReader } from "../output-decode";
 
 export interface JsExecutorOptions {
+	outputEncoding?: "utf8" | "gbk";
 	cwd?: string;
 	timeoutMs?: number;
 	deadlineMs?: number;
@@ -45,7 +47,7 @@ export interface JsExecutorOptions {
 	localRoots?: Record<string, string>;
 }
 
-export interface JsResult {
+export interface JsResult extends OutputDecodeProvenance {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -105,6 +107,7 @@ function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean):
 }
 
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
+	const byteReaders = new Map<string, { reader: RawOutputReader; seq: number }>();
 	const display = new DisplayOutputCollector<JsDisplayOutput>();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
@@ -175,6 +178,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
+				onBytes: (stream, data) => {
+					let capture = byteReaders.get(stream);
+					if (!capture) {
+						capture = { reader: new RawOutputReader(options.outputEncoding), seq: 0 };
+						byteReaders.set(stream, capture);
+					}
+					outputSink.push(capture.reader.push(capture.seq++, data));
+				},
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
@@ -189,6 +200,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		});
 		const summary = await outputSink.dump();
 		return {
+			// A cell result is not stdout/stderr EOF; do not finish a decoder
+			// here or present its partial observations as a complete summary.
+			outputEncodingUnknownReaders: byteReaders.size || undefined,
 			output: summary.output,
 			exitCode: 0,
 			cancelled: false,
@@ -218,6 +232,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			}
 			const summary = await outputSink.dump();
 			return {
+				outputEncodingUnknownReaders: byteReaders.size || undefined,
 				output: summary.output,
 				exitCode: undefined,
 				cancelled: true,
@@ -236,6 +251,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {
+			outputEncodingUnknownReaders: byteReaders.size || undefined,
 			output: summary.output,
 			exitCode: 1,
 			cancelled: false,

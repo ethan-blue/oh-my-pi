@@ -187,6 +187,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 			buildPayload: (code, msgId, opts) =>
 				JSON.stringify({
 					id: msgId,
+					rawOutputProtocol: 1,
 					code,
 					cwd: opts?.cwd,
 					filename: opts?.filename,
@@ -202,7 +203,11 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	/** Describe or invoke a tool defined in this retained Python kernel. */
 	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		const id = options?.id ?? Snowflake.next();
-		return await this.submitRequest(id, JSON.stringify({ type: "tool", id, ...request }), options);
+		return await this.submitRequest(
+			id,
+			JSON.stringify({ type: "tool", id, rawOutputProtocol: 1, ...request }),
+			options,
+		);
 	}
 
 	/** Synchronize enabled capability snippets before the next user cell. */

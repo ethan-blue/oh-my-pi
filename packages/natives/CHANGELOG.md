@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `OutputDecoder`, the incremental child-output decoder shared with the embedded shell: explicit `gbk`/`utf8` encoding, and `encoding`/`replacements` reporting of what a capture actually used.
+- Added `outputEncoding` to shell run/execute options and `outputEncoding`/`outputReplacements` to run results.
+- Added `outputEncoding` to PTY start/startArgv options and optional decode provenance to PTY results; a merged reader is complete only after EOF, decoder finish and successful output forwarding.
+- Added `encodingUtf8AmbiguousWithGbk` (byte-level GBK/UTF-8 overlap test) and `resolveDetailed` on `EncodingPolicy` (encoding plus whether an override selected it); search results list `ambiguousEncodingFiles`.
+
 ### Fixed
 
+- Withheld PTY uniform encoding and substitution totals after cancellation, reader failure, failed forwarding or incomplete draining.
 - Applied encoding include rules to new files and rejected Python source encoding conflicts before editing ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 - Rejected invalid UTF-8 or GBK search input instead of returning replacement-character matches ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 

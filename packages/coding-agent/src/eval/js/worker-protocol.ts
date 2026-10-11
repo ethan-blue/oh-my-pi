@@ -63,6 +63,7 @@ export type WorkerOutbound =
 	| { type: "ready" }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "text"; runId: string; chunk: string }
+	| { type: "bytes"; runId: string; stream: "stdout" | "stderr"; data: string }
 	| { type: "display"; runId: string; output: JsDisplayOutput }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown; identity?: RuntimeCallIdentity }
 	| { type: "result"; runId: string; ok: true }

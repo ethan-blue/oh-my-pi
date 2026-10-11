@@ -17,6 +17,7 @@ import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import { RawOutputReader } from "../output-decode";
 import type { ShadowPlan } from "../speculation/types";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
@@ -38,6 +39,7 @@ export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
 export type { JsDisplayOutput } from "./worker-protocol";
 
 export interface VmRunState {
+	onBytes?: (stream: "stdout" | "stderr", data: string) => void;
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
 	onDisplay?: (output: JsDisplayOutput) => void;
@@ -60,6 +62,7 @@ export interface JsEvalWorkerFactories {
 }
 
 interface PendingRun {
+	rawOutputReaders?: Map<string, { reader: RawOutputReader; seq: number }>;
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
@@ -740,6 +743,21 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 
 function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 	switch (msg.type) {
+		case "bytes": {
+			const pending = session.pending.get(msg.runId);
+			if (!pending) return;
+			if (pending.runState.onBytes) pending.runState.onBytes(msg.stream, msg.data);
+			else {
+				pending.rawOutputReaders ??= new Map();
+				let capture = pending.rawOutputReaders.get(msg.stream);
+				if (!capture) {
+					capture = { reader: new RawOutputReader(), seq: 0 };
+					pending.rawOutputReaders.set(msg.stream, capture);
+				}
+				pending.runState.onText?.(capture.reader.push(capture.seq++, msg.data));
+			}
+			return;
+		}
 		case "text": {
 			const pending = session.pending.get(msg.runId);
 			pending?.runState.onText?.(msg.chunk);

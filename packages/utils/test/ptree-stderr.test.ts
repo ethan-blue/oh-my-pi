@@ -80,6 +80,32 @@ describe("ptree stderr capture", () => {
 		expect(streamed).toBe(result.stderr);
 	});
 
+	it("decodes every stream through the injected decoder, including full stderr", async () => {
+		// One factory instance per stream: stdout's live reader and stderr's
+		// eager drain, plus the full-capture re-decode, all go through it —
+		// callers that capture non-UTF-8 tools share one decode policy.
+		let instances = 0;
+		const outputDecoder = () => {
+			instances++;
+			return {
+				push: (bytes: Uint8Array) => Buffer.from(bytes).toString("utf8").toUpperCase(),
+				finish: () => "",
+			};
+		};
+		const script =
+			"await Bun.stdout.write('ab-cd\\nef\\n');" +
+			"await Bun.stderr.write('gh\\n');" +
+			"await Bun.stdout.write('tail');" +
+			"await Bun.stderr.write('err-tail');";
+		const result = await exec(["bun", "-e", script], { stderr: "full", outputDecoder });
+		expect(result.stdout).toBe("AB-CD\nEF\nTAIL");
+		// The full-stderr re-decode path uses the factory too.
+		expect(result.stderr).toBe("GH\nERR-TAIL");
+		// One instance per decode pass: stdout's live reader, stderr's eager
+		// drain, and stderr's full-capture re-decode.
+		expect(instances).toBe(3);
+	});
+
 	it("keeps peek and nonzero errors on the bounded stderr tail", async () => {
 		using child = spawn(stderrFixture(STDERR_LIMIT * 4, 7));
 		let error: unknown;

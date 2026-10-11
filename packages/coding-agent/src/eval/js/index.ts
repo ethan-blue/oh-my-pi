@@ -38,6 +38,7 @@ export default {
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const identity = resolveJsKernelIdentity(opts.session);
 		const result = await executeJs(code, {
+			outputEncoding: opts.outputEncoding,
 			cwd: opts.cwd,
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,

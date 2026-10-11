@@ -26,7 +26,12 @@ import {
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
-import { assertSourceEncoding, discoverEncodingPolicy, encodeStrict } from "../encoding/index";
+import {
+	assertSourceEncoding,
+	discoverEncodingPolicy,
+	readGbkAmbiguityDiagnostic,
+	encodeStrict,
+} from "../encoding/index";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
@@ -279,6 +284,12 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
  * ones degrade to text-only.
  */
 const MAX_EDIT_SNAPSHOT_TEXT_CHARS = 32_768;
+/**
+ * Whole-file cap for the GBK/UTF-8 ambiguity pre-write check: above it the
+ * file's bytes are not buffered, so the whole-file "also valid UTF-8" claim
+ * cannot be made cheaply and the check is skipped (same cap as the read
+ * tool's buffered path).
+ */
 
 function capPerFileSnapshots(entries: EditToolPerFileResult[]): EditToolPerFileResult[] {
 	let remaining = MAX_EDIT_SNAPSHOT_TEXT_CHARS;
@@ -487,11 +498,14 @@ export class EditTool implements AgentTool<TInput> {
 		}
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
+		// G4 pre-write diagnostics collected by #write: files whose on-disk
+		// bytes are byte-ambiguously valid UTF-8 under a GBK include rule.
+		const encodingNotes: string[] = [];
 		let outcome;
 		try {
 			outcome = await editSession.apply(
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
-				(_error, request) => this.#write(request, signal),
+				(_error, request) => this.#write(request, signal, encodingNotes),
 			);
 			if (outcome.isError && batch?.flush) {
 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
@@ -551,6 +565,7 @@ export class EditTool implements AgentTool<TInput> {
 			);
 		}
 		if (notes.length > 0) result.content.push({ type: "text", text: notes.join("\n\n") });
+		if (encodingNotes.length > 0) result.content.push({ type: "text", text: encodingNotes.join("\n\n") });
 		return result;
 	}
 
@@ -642,10 +657,21 @@ export class EditTool implements AgentTool<TInput> {
 		}
 	}
 
-	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+	async #write(request: EditWriteRequest, signal?: AbortSignal, encodingNotes?: string[]): Promise<EditWriteResponse> {
 		assertProtectedConfigMutation(request.path);
 		if (request.moveTo) assertProtectedConfigMutation(request.moveTo);
 		const gbk = request.encoding === "gbk";
+		// Before the first disk mutation, flag a GBK-managed existing file whose
+		// current bytes are also valid UTF-8 — the edit applies either way (the
+		// policy is explicit), but the reader must know both readings exist.
+		// Best-effort: a failed read never blocks the edit itself.
+		if (gbk && encodingNotes !== undefined && request.op !== "create") {
+			const resolved = discoverEncodingPolicy(this.session.cwd)?.policy.resolveDetailed(request.path, true);
+			if (resolved?.encoding === "gbk" && !resolved.fromOverride) {
+				const { notice } = await readGbkAmbiguityDiagnostic(this.session.cwd, request.path);
+				if (notice !== undefined && !encodingNotes.includes(notice)) encodingNotes.push(notice);
+			}
+		}
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {

@@ -81,6 +81,32 @@ describe("runInteractiveBashPty", () => {
 		return result.output;
 	}
 
+	it.skipIf(Bun.env.PI_NO_PTY === "1")(
+		"preserves native decode provenance through the interactive consumer",
+		async () => {
+			if (process.platform === "win32") {
+				vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+					shell: Bun.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+					args: ["/d", "/s", "/c"],
+					env: { PATH: Bun.env.PATH ?? "" },
+					prefix: undefined,
+				});
+			}
+			const result = await runInteractiveBashPty(headlessUi(), {
+				command: "echo pty-provenance",
+				outputEncoding: "utf8",
+				cwd: tempDir.path(),
+				timeoutMs: 15_000,
+			});
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("pty-provenance");
+			expect(result.outputEncoding).toBe("utf8");
+			expect(result.outputEncodings).toEqual(["utf8"]);
+			expect(result.outputReplacements).toBe(0);
+			expect(result.outputEncodingUnknownReaders).toBeUndefined();
+		},
+	);
+
 	it.skipIf(ptyUnavailable)(
 		"runs the command with the shell spawn env minus its non-interactive guards, direnv overrides on top, and a real TERM",
 		async () => {

@@ -16,6 +16,7 @@ import {
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
+import type { OutputDecodeProvenance } from "../output-decode";
 import { getEnabledEvalPreludes } from "../preludes";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
@@ -58,6 +59,7 @@ export interface PythonToolInvokeOptions {
 }
 
 export interface PythonExecutorOptions {
+	outputEncoding?: "utf8" | "gbk";
 	/** Working directory for command execution */
 	cwd?: string;
 	/** Source filename for file-backed execution and tracebacks. */
@@ -138,7 +140,7 @@ export interface PythonKernelExecutor {
 	) => Promise<void>;
 }
 
-export interface PythonResult {
+export interface PythonResult extends OutputDecodeProvenance {
 	/** Combined stdout + stderr output (sanitized, possibly truncated) */
 	output: string;
 	/** Execution exit code (0 ok, 1 error, undefined if cancelled) */

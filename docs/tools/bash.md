@@ -27,6 +27,7 @@
 | `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Nonzero values (including the default) are capped by a positive `tools.maxTimeout`, then clamped to `1..3600`. |
 | `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`, or a registered internal URL directory for embedded-shell execution. Must exist and be a directory. |
 | `pty` | `boolean` | No | Request PTY mode. Default `false` for finite commands, `true` for named services. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
+| `outputEncoding` | `"gbk" \| "utf8"` | No | Decode captured bytes as CP936 or UTF-8 only. Applies to the local embedded shell, protected builds and local PTY captures. Omitted means UTF-8-first auto mode; Windows falls back to its ANSI code page after invalid UTF-8. Named-service logs and ACP client-terminal text are separate capture surfaces. |
 | `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`. |
 | `name` | `string` | No | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
 | `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice. |
@@ -66,6 +67,10 @@ The tool returns a `text` content block plus optional `details` and image blocks
   - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+
+Local capture results carry optional `outputEncoding`, `outputReplacements`, `outputEncodings` and `outputEncodingUnknownReaders`. Tool text notes non-UTF-8 or mixed decoding, substitutions, and incomplete capture. A uniform encoding and total substitutions are reported only when all captured readers completed; cancellation or failed forwarding does not become a fabricated `utf8` / `0`. PTY has one merged reader. Windows ConPTY may convert child console bytes before OMP receives them, so this option cannot restore bytes already changed by the terminal.
+
+Output decoding does not change file encoding policy or intercept files written by external commands. Use the native file tools and the project's encoding policy for source edits.
 
 ## Command policy and dedicated-tool routing
 

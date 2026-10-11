@@ -1449,6 +1449,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						}
 
 						output = `Applied "${appliedAction.title}":\n${summaryLines.join("\n")}`;
+						if (appliedAction.encodingNotes?.length) {
+							output += `\n\n${formatLspEncodingNotes(appliedAction.encodingNotes)}`;
+						}
 						break;
 					}
 
@@ -1517,6 +1520,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (shouldApply) {
 							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
+							if (applied.encodingNotes?.length) {
+								output += `\n\n${formatLspEncodingNotes(applied.encodingNotes)}`;
+							}
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);
 							output = `Rename preview:\n${preview.map(p => `  ${p}`).join("\n")}`;
@@ -1560,4 +1566,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 	}
+}
+
+function formatLspEncodingNotes(notes: string[]): string {
+	if (notes.length <= 10) {
+		return notes.join("\n\n");
+	}
+	const visible = notes.slice(0, 10);
+	const omittedCount = notes.length - 10;
+	return `${visible.join("\n\n")}\n\n[... and ${omittedCount} more encoding note(s) omitted]`;
 }

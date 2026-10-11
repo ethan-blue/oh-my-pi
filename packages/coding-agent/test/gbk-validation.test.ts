@@ -3,7 +3,7 @@
  * cap (E24), Chinese and spaced paths (E26), subprocess command reentry
  * (E28), and policy-change cache invalidation (E29).
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -201,6 +201,147 @@ describe("GBK validation gaps", () => {
 		const discovered = discoverEncodingPolicy(tmpDir);
 		expect(discovered?.policy.resolve(file, true)).toBeNull();
 
+		getEditStore(session);
+		expect(store.headText(file)).toBeNull();
+	});
+
+	// ── R4: the policy cache must validate content, not mtime alone ──────────
+
+	/** Write `json` to the project's encoding.json and pin its mtime to
+	 * `stamp`, so consecutive rewrites are indistinguishable by mtime. */
+	async function rewritePolicyPinned(json: string, stamp: Date): Promise<void> {
+		const configPath = path.join(tmpDir, ".omp", "encoding.json");
+		await fs.writeFile(configPath, json, "utf8");
+		await fs.utimes(configPath, stamp, stamp);
+		// Guard the setup itself: the pinned mtime must really reproduce, or
+		// the test would pass for the wrong reason (different mtime).
+		expect((await fs.stat(configPath)).mtimeMs).toBe(stamp.getTime());
+	}
+
+	it("same-mtime content change gbk→utf8 is picked up (R4)", async () => {
+		const file = path.join(tmpDir, "src", "a.c");
+		const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+		await rewritePolicyPinned(POLICY, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBe("gbk");
+
+		const utf8 = JSON.stringify({
+			schemaVersion: 1,
+			enabled: true,
+			include: ["src/**"],
+			defaultEncoding: "utf8",
+			newFileEncoding: "utf8",
+			overrides: [],
+		});
+		await rewritePolicyPinned(utf8, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBe("utf8");
+	});
+
+	it("same-mtime, same-size override reorder is picked up (R4)", async () => {
+		const file = path.join(tmpDir, "src", "a.c");
+		const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+		// Two same-length policies differing only in override ORDER: the first
+		// matching override wins, so the resolved encoding flips while byte
+		// length and mtime stay identical.
+		const utf8First = JSON.stringify({
+			schemaVersion: 1,
+			enabled: true,
+			include: ["src/**"],
+			defaultEncoding: "gbk",
+			newFileEncoding: "gbk",
+			overrides: [
+				{ glob: "src/a.c", encoding: "utf8" },
+				{ glob: "src/a.c", encoding: "gbk" },
+			],
+		});
+		const gbkFirst = JSON.stringify({
+			schemaVersion: 1,
+			enabled: true,
+			include: ["src/**"],
+			defaultEncoding: "gbk",
+			newFileEncoding: "gbk",
+			overrides: [
+				{ glob: "src/a.c", encoding: "gbk" },
+				{ glob: "src/a.c", encoding: "utf8" },
+			],
+		});
+		expect(utf8First.length).toBe(gbkFirst.length);
+
+		await rewritePolicyPinned(utf8First, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBe("utf8");
+		await rewritePolicyPinned(gbkFirst, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBe("gbk");
+	});
+
+	it("same-mtime enable→disable is picked up (R4)", async () => {
+		const file = path.join(tmpDir, "src", "a.c");
+		const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+		await rewritePolicyPinned(POLICY, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBe("gbk");
+
+		const disabled = JSON.stringify({
+			schemaVersion: 1,
+			enabled: false,
+			include: ["src/**"],
+			defaultEncoding: "gbk",
+			newFileEncoding: "gbk",
+			overrides: [],
+		});
+		await rewritePolicyPinned(disabled, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBeNull();
+	});
+
+	it("a newly created policy is found once the negative TTL passes (R4)", async () => {
+		// A fresh tree with no policy anywhere on the walk (the suite's tmpDir
+		// already carries one): the negative cache bounds how long a newly
+		// created policy can go unnoticed. Advance the clock deterministically
+		// instead of sleeping.
+		const isolated = await fs.mkdtemp(path.join(os.tmpdir(), "gbk-nocache-"));
+		try {
+			let simulatedTime = 1_700_000_000_000;
+			const now = spyOn(Date, "now").mockImplementation(() => simulatedTime);
+			try {
+				expect(discoverEncodingPolicy(isolated)).toBeUndefined();
+				await fs.mkdir(path.join(isolated, ".omp"), { recursive: true });
+				const configPath = path.join(isolated, ".omp", "encoding.json");
+				const stamp = new Date(simulatedTime);
+				await fs.writeFile(configPath, POLICY, "utf8");
+				await fs.utimes(configPath, stamp, stamp);
+				// Still inside the TTL window.
+				expect(discoverEncodingPolicy(isolated)).toBeUndefined();
+				// Past it.
+				simulatedTime += 1100;
+				const discovered = discoverEncodingPolicy(isolated);
+				expect(discovered?.policy.resolve(path.join(isolated, "src", "a.c"), true)).toBe("gbk");
+			} finally {
+				now.mockRestore();
+			}
+		} finally {
+			await removeWithRetries(isolated);
+		}
+	});
+
+	it("same-mtime disable clears the edit store (E29 under R4 conditions)", async () => {
+		const file = path.join(tmpDir, "src", "a.c");
+		await Bun.write(file, Buffer.from(gbkBytes("// 中文注释\n")));
+		const session = createSession(tmpDir);
+		const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+		await rewritePolicyPinned(POLICY, stamp);
+
+		const first = await new ReadTool(session).execute("read-1", { path: file });
+		expect(resultText(first)).toContain("// 中文注释");
+		const store = getEditStore(session);
+		expect(store.headText(file)).toBe("// 中文注释\n");
+
+		const disabled = JSON.stringify({
+			schemaVersion: 1,
+			enabled: false,
+			include: ["src/**"],
+			defaultEncoding: "gbk",
+			newFileEncoding: "gbk",
+			overrides: [],
+		});
+		await rewritePolicyPinned(disabled, stamp);
+		expect(discoverEncodingPolicy(tmpDir)?.policy.resolve(file, true)).toBeNull();
 		getEditStore(session);
 		expect(store.headText(file)).toBeNull();
 	});

@@ -356,6 +356,16 @@ export class WorkerCore {
 		this.#runs.set(runId, active);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
+			onBytes: (stream, bytes) => {
+				for (let offset = 0; offset < bytes.length; offset += 65_536) {
+					this.#transport.send({
+						type: "bytes",
+						runId,
+						stream,
+						data: Buffer.from(bytes.subarray(offset, offset + 65_536)).toString("base64"),
+					});
+				}
+			},
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
 			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
 		};
@@ -393,6 +403,16 @@ export class WorkerCore {
 		this.#runs.set(msg.runId, active);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId: msg.runId, chunk }),
+			onBytes: (stream, bytes) => {
+				for (let offset = 0; offset < bytes.length; offset += 65_536) {
+					this.#transport.send({
+						type: "bytes",
+						runId: msg.runId,
+						stream,
+						data: Buffer.from(bytes.subarray(offset, offset + 65_536)).toString("base64"),
+					});
+				}
+			},
 			onDisplay: output => this.#transport.send({ type: "display", runId: msg.runId, output }),
 			callTool: (name, args) => this.#callTool(active, name, args),
 		};

@@ -488,6 +488,7 @@ export interface AppliedCodeActionResult {
 	title: string;
 	edits: string[];
 	executedCommands: string[];
+	encodingNotes?: string[];
 }
 
 function isCommandItem(action: CodeAction | Command): action is Command {
@@ -523,7 +524,14 @@ export async function applyCodeAction(
 		return null;
 	}
 
-	return { title: resolvedAction.title, edits, executedCommands };
+	const encodingNotes =
+		"encodingNotes" in edits && Array.isArray(edits.encodingNotes) ? (edits.encodingNotes as string[]) : undefined;
+	return {
+		title: resolvedAction.title,
+		edits,
+		executedCommands,
+		...(encodingNotes?.length ? { encodingNotes } : {}),
+	};
 }
 
 const GLOB_PATTERN_CHARS = /[*?[{]/;

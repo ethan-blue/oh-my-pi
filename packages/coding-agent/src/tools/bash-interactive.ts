@@ -14,12 +14,18 @@ export interface BashInteractiveResult extends OutputSummary {
 	timedOut: boolean;
 	/** Terminal graphics extracted from raw PTY output before transcript sanitization. */
 	images?: ImageContent[];
+	/** Provenance of the single merged PTY reader, absent when capture is incomplete. */
+	outputEncoding?: string;
+	outputReplacements?: number;
+	outputEncodings?: string[];
+	outputEncodingUnknownReaders?: number;
 }
 
 export async function runInteractiveBashPty(
 	ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
 	options: {
 		command: string;
+		outputEncoding?: "utf8" | "gbk";
 		cwd: string;
 		timeoutMs?: number;
 		signal?: AbortSignal;
@@ -73,6 +79,10 @@ export async function runInteractiveBashPty(
 							exitCode: run.exitCode,
 							cancelled: run.cancelled,
 							timedOut: run.timedOut,
+							outputEncoding: run.outputEncoding,
+							outputReplacements: run.outputReplacements,
+							outputEncodings: run.outputEncodings,
+							outputEncodingUnknownReaders: run.outputEncodingUnknownReaders,
 							...summary,
 							...(images.length > 0 ? { images } : {}),
 						});
@@ -107,6 +117,7 @@ export async function runInteractiveBashPty(
 					.start(
 						{
 							command: options.command,
+							outputEncoding: options.outputEncoding,
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
 							// A real TERM so editors, pagers, and TUIs behave like a normal
@@ -128,7 +139,7 @@ export async function runInteractiveBashPty(
 					.then(finalize)
 					.catch(error => {
 						sink.push(`PTY error: ${error instanceof Error ? error.message : String(error)}\n`);
-						finalize({ exitCode: undefined, cancelled: false, timedOut: false });
+						finalize({ exitCode: undefined, cancelled: false, timedOut: false, outputEncodingUnknownReaders: 1 });
 					});
 				return component;
 			},

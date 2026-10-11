@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `outputEncoding` to local bash captures, including PTY, and eval's Python subprocess PIPE / JavaScript byte-write captures: pass `gbk` for CP936 or `utf8` for UTF-8-only decoding. Capture results report completed readers, mixed encodings, substitutions, and incomplete provenance without inventing a uniform encoding or zero loss.
+- Captured Python kernel fd-1 bytes with a persistent native decoder and an explicit kernel-scope label; late output and cross-cell fragments are no longer attributed to the next cell's stdout.
+
 ### Fixed
 
+- Prevented Python raw-output duplex pipe deadlocks with a bounded credit window and an EOF text-delivery acknowledgement; display truncation still drains and counts captured bytes.
+- Preserved incomplete capture provenance when eval is cancelled or its kernel exits, and enforced the raw-output frame limit on decoded byte length.
 - Reported ompg runtime identity and resolved data locations to agents, including custom prompt modes ([#1](https://github.com/ethan-blue/oh-my-pi/issues/1)).
 - Accepted model selectors in extension `setModel` and diagnosed invalid selections or missing credentials ([#2](https://github.com/ethan-blue/oh-my-pi/issues/2)).
 - Kept new-file encoding within include rules and rejected conflicting Python source declarations before writing; text reads and searches now reject invalid encoded input ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
+- Reported GBK/UTF-8 byte-level ambiguity: reads (including `:raw`), searches and edits note files a GBK include rule covers whose bytes are also valid UTF-8, and decode failures on proven-UTF-8 bytes say so ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 - Fixed ompg Windows installation, isolated version upgrades and rollback; uninstall now preserves unmanaged files.
 - Fixed protected-mode cwd escapes and configuration edits; configured builds now execute checked arguments directly without shell startup.
 - Fixed GBK LSP create/rename edits and rejected byte-normalizing writes before changing files.

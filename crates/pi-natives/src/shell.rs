@@ -18,7 +18,7 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::{
-	MinimizerResult as CoreMinimizerResult, Shell as CoreShell,
+	MinimizerResult as CoreMinimizerResult, OutputEncodingPreference, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
 	execute_shell as core_execute_shell, minimizer,
@@ -135,41 +135,61 @@ impl From<ShellOptions> for CoreShellOptions {
 #[napi(object, object_to_js = false)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
-	pub command:    String,
+	pub command:         String,
 	/// Working directory for the command.
-	pub cwd:        Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables to apply for this command only.
-	pub env:        Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling the command.
-	pub timeout_ms: Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:     Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// Filesystem for this run only, replacing the session's; the session's
 	/// filesystem applies again to later runs.
-	pub filesystem: Option<ShellFilesystem>,
+	pub filesystem:      Option<ShellFilesystem>,
+	/// Declared encoding of the captured output stream: `"utf8"` (UTF-8 only,
+	/// invalid bytes become U+FFFD), `"gbk"` (the whole stream as CP936), or
+	/// absent for the automatic UTF-8-first decode with the Windows ANSI code
+	/// page as fallback. The run result reports what was actually used.
+	pub output_encoding: Option<String>,
 }
 
 /// Options for executing a shell command via brush-core.
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
-	pub command:       String,
+	pub command:         String,
 	/// Working directory for the command.
-	pub cwd:           Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables to apply for this command only.
-	pub env:           Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Environment variables to apply once per session.
-	pub session_env:   Option<HashMap<String, String>>,
+	pub session_env:     Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling the command.
-	pub timeout_ms:    Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Optional snapshot file to source on session creation.
-	pub snapshot_path: Option<String>,
+	pub snapshot_path:   Option<String>,
 	/// Optional per-command output minimizer configuration.
-	pub minimizer:     Option<MinimizerOptions>,
+	pub minimizer:       Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
-	pub signal:        Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// Filesystem backing the command (native when absent).
-	pub filesystem:    Option<ShellFilesystem>,
+	pub filesystem:      Option<ShellFilesystem>,
+	/// Declared encoding of the captured output stream; see
+	/// [`ShellRunOptions::output_encoding`].
+	pub output_encoding: Option<String>,
+}
+
+/// Parse the caller-declared output encoding; absent means automatic.
+pub(crate) fn parse_output_encoding(value: Option<&str>) -> Result<OutputEncodingPreference> {
+	match value.map(str::trim).filter(|value| !value.is_empty()) {
+		None | Some("auto") => Ok(OutputEncodingPreference::Auto),
+		Some("utf8" | "utf-8") => Ok(OutputEncodingPreference::Utf8),
+		Some("gbk" | "cp936" | "ms936") => Ok(OutputEncodingPreference::Gbk),
+		Some(other) => {
+			Err(Error::from_reason(format!("unknown outputEncoding '{other}' (supported: utf8, gbk)")))
+		},
+	}
 }
 
 /// Telemetry for a single minimization.
@@ -219,22 +239,44 @@ pub struct ShellRunResult {
 	pub timed_out: bool,
 
 	/// When the minimizer rewrote the captured output, this carries the
-	/// original buffer + telemetry so the session layer can persist it as
-	/// an artifact and splice an `artifact://<id>` reference into the
+	/// original buffer + telemetry so the session layer can persist it as an
+	/// artifact and splice an `artifact://<id>` reference into the
 	/// minimized text shown to the agent. `None` when nothing was rewritten.
-	pub minimized:   Option<MinimizerResult>,
+	pub minimized: Option<MinimizerResult>,
 	/// Shell working directory after command completion.
 	pub working_dir: Option<String>,
+	/// Encoding the command's captured output was decoded with: `"utf8"`,
+	/// `"gbk"` (explicit), or `"cp<N>"` for a Windows ANSI code page fallback
+	/// (e.g. `"cp936"` on a Simplified Chinese system). `null` when the
+	/// readers disagreed (see `outputEncodings`) or any finished without a
+	/// summary (see `outputEncodingUnknownReaders`).
+	pub output_encoding: Option<String>,
+	/// Distinct encodings among the settled output readers, first-seen order —
+	/// one entry per captured stream/chain segment, so mixed sources stay
+	/// visible. `null` when nothing was observed.
+	pub output_encodings: Option<Vec<String>>,
+	/// Undecodable byte sequences substituted across all settled readers
+	/// (U+FFFD in the UTF-8/GBK modes, the Windows default character in the
+	/// ACP mode); `null` while any reader is unobserved.
+	pub output_replacements: Option<u32>,
+	/// Captured output readers that finished WITHOUT a decode summary (killed
+	/// at shutdown, pipe registration failure). `null` when every reader
+	/// settled.
+	pub output_encoding_unknown_readers: Option<u32>,
 }
 
 impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
-			exit_code:   value.exit_code,
-			cancelled:   value.cancelled,
-			timed_out:   value.timed_out,
-			minimized:   value.minimized.map(Into::into),
+			exit_code: value.exit_code,
+			cancelled: value.cancelled,
+			timed_out: value.timed_out,
+			minimized: value.minimized.map(Into::into),
 			working_dir: value.working_dir,
+			output_encoding: value.output_encoding,
+			output_encodings: value.output_encodings,
+			output_replacements: value.output_replacements,
+			output_encoding_unknown_readers: value.output_encoding_unknown_readers,
 		}
 	}
 }
@@ -271,11 +313,12 @@ impl Shell {
 		let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 		let inner = Arc::clone(&self.inner);
 		let run_options = CoreShellRunOptions {
-			command:    options.command,
-			cwd:        options.cwd,
-			env:        options.env,
-			timeout_ms: options.timeout_ms,
-			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
+			command:         options.command,
+			cwd:             options.cwd,
+			env:             options.env,
+			timeout_ms:      options.timeout_ms,
+			filesystem:      options.filesystem.map(ShellFilesystem::into_fs),
+			output_encoding: parse_output_encoding(options.output_encoding.as_deref())?,
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -333,14 +376,15 @@ pub fn execute_shell<'env>(
 ) -> Result<PromiseRaw<'env, ShellRunResult>> {
 	let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 	let exec_options = CoreShellExecuteOptions {
-		command:       options.command,
-		cwd:           options.cwd,
-		env:           options.env,
-		session_env:   options.session_env,
-		timeout_ms:    options.timeout_ms,
-		snapshot_path: options.snapshot_path,
-		minimizer:     options.minimizer.map(Into::into),
-		filesystem:    options.filesystem.map_or_default(ShellFilesystem::into_fs),
+		command:         options.command,
+		cwd:             options.cwd,
+		env:             options.env,
+		session_env:     options.session_env,
+		timeout_ms:      options.timeout_ms,
+		snapshot_path:   options.snapshot_path,
+		minimizer:       options.minimizer.map(Into::into),
+		filesystem:      options.filesystem.map_or_default(ShellFilesystem::into_fs),
+		output_encoding: parse_output_encoding(options.output_encoding.as_deref())?,
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -351,6 +395,56 @@ pub fn execute_shell<'env>(
 		await_drain(drain_handle, &result).await;
 		result
 	})
+}
+
+/// Incremental decoder for one captured child-process output stream.
+///
+/// The same decoder the embedded shell's pipe readers use, exposed so
+/// TypeScript capture paths (e.g. the protected-build process tree) share one
+/// decode policy instead of running a parallel UTF-8-only one. One instance
+/// per stream; `push` each chunk as it arrives, `finish` at EOF, then read
+/// `encoding`/`replacements` to annotate the captured result.
+#[napi]
+pub struct OutputDecoder {
+	inner: pi_shell::output_decode::OutputDecoder,
+}
+
+#[napi]
+impl OutputDecoder {
+	/// Create a decoder. `encoding` `"utf8"` decodes UTF-8 only (invalid bytes
+	/// become U+FFFD), `"gbk"` decodes the whole stream as CP936; when absent,
+	/// UTF-8 is tried first with the Windows ANSI code page as fallback.
+	#[napi(constructor)]
+	pub fn new(encoding: Option<String>) -> Result<Self> {
+		let preference = parse_output_encoding(encoding.as_deref())?;
+		Ok(Self { inner: pi_shell::output_decode::OutputDecoder::with_preference(preference) })
+	}
+
+	/// Push the next chunk of captured bytes; returns the text that is safe to
+	/// emit now (incomplete multi-byte sequences stay buffered).
+	#[napi]
+	pub fn push(&mut self, bytes: Uint8Array) -> String {
+		self.inner.push(&bytes)
+	}
+
+	/// Flush held bytes at end of stream.
+	#[napi]
+	pub fn finish(&mut self) -> String {
+		self.inner.finish()
+	}
+
+	/// Encoding actually used so far: `"utf8"`, `"gbk"`, or `"cp<N>"` for a
+	/// Windows ANSI code page fallback.
+	#[napi(getter)]
+	pub fn encoding(&self) -> String {
+		self.inner.mode().as_str()
+	}
+
+	/// Undecodable byte sequences replaced with U+FFFD so far.
+	#[napi(getter)]
+	pub const fn replacements(&self) -> u32 {
+		self.inner.replacements()
+	}
 }
 
 /// Capacity (in chunks) of the queue between the output readers (pipe or PTY)
@@ -381,18 +475,16 @@ fn bridge_chunks(
 		return (None, None);
 	};
 	let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
-	let handle = napi::tokio::spawn(pump_chunks(
-		rx,
-		FORWARD_STALL_TIMEOUT,
-		None,
-		async move |payload: String| {
+	let handle = napi::tokio::spawn(async move {
+		pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async move |payload: String| {
 			// `call_async` resolves only after the JS callback ran, so at most
 			// one batch sits in the napi queue at a time and the JS event loop's
 			// actual consumption rate backpressures the whole pipeline. An error
 			// means the JS side is gone (env teardown) — stop forwarding.
 			on_chunk.call_async(Ok(payload)).await.is_ok()
-		},
-	));
+		})
+		.await;
+	});
 	(Some(tx), Some(handle))
 }
 
@@ -426,7 +518,7 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 	stall_timeout: Duration,
 	busy: Option<&AtomicBool>,
 	mut forward: impl AsyncFnMut(String) -> bool,
-) {
+) -> bool {
 	// Hard cap on one coalesced batch so the JS main thread never sees a
 	// multi-MB napi callback (a giant single string would stall sanitize +
 	// tail-buffer maintenance for the whole copy).
@@ -473,9 +565,10 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 		let forwarded = napi::tokio::time::timeout(stall_timeout, forward(payload)).await;
 		set_busy(false);
 		if !matches!(forwarded, Ok(true)) {
-			return;
+			return false;
 		}
 	}
+	true
 }
 
 /// Upper bound on how long to wait for the chunk-forwarding pump after an
@@ -619,25 +712,27 @@ mod tests {
 		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
 		let forwarded = Arc::new(AtomicBool::new(false));
 		let observed = Arc::clone(&forwarded);
-		let handle = napi::tokio::spawn(pump_chunks(
-			rx,
-			FORWARD_STALL_TIMEOUT,
-			None,
-			async move |_payload: String| {
+		let handle = napi::tokio::spawn(async move {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async move |_payload: String| {
 				time::sleep(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
 				observed.store(true, Ordering::Release);
 				true
-			},
-		));
+			})
+			.await;
+		});
 		tx.send("accepted".to_string())
 			.expect("pump should be connected");
 		drop(tx);
 		let result = Ok(ShellRunResult {
-			exit_code:   Some(0),
-			cancelled:   false,
-			timed_out:   false,
-			minimized:   None,
+			exit_code: Some(0),
+			cancelled: false,
+			timed_out: false,
+			minimized: None,
 			working_dir: None,
+			output_encoding: None,
+			output_encodings: None,
+			output_replacements: None,
+			output_encoding_unknown_readers: None,
 		});
 
 		time::timeout(
@@ -661,19 +756,20 @@ mod tests {
 	async fn await_drain_returns_when_a_reader_orphans_a_sender_after_timeout() {
 		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
 		let orphan = tx.clone();
-		let handle = napi::tokio::spawn(pump_chunks(
-			rx,
-			FORWARD_STALL_TIMEOUT,
-			None,
-			async |_payload: String| true,
-		));
+		let handle = napi::tokio::spawn(async move {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |_payload: String| true).await;
+		});
 		drop(tx);
 		let result = Ok(ShellRunResult {
-			exit_code:   None,
-			cancelled:   false,
-			timed_out:   true,
-			minimized:   None,
+			exit_code: None,
+			cancelled: false,
+			timed_out: true,
+			minimized: None,
 			working_dir: None,
+			output_encoding: None,
+			output_encodings: None,
+			output_replacements: None,
+			output_encoding_unknown_readers: None,
 		});
 		let started = time::Instant::now();
 		time::timeout(
@@ -825,11 +921,12 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "sh -c 'sleep 30 & wait'".to_string(),
-						cwd:        None,
-						env:        None,
-						timeout_ms: None,
-						filesystem: None,
+						command:         "sh -c 'sleep 30 & wait'".to_string(),
+						cwd:             None,
+						env:             None,
+						timeout_ms:      None,
+						filesystem:      None,
+						output_encoding: Default::default(),
 					},
 					None,
 					cancel,
@@ -861,14 +958,15 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 3 4 \
-						             5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; printf \
-						             'READY\\n' >&2; read -r; }"
+						command:         "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 \
+						                  3 4 5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; \
+						                  printf 'READY\\n' >&2; read -r; }"
 							.to_string(),
-						cwd:        None,
-						env:        None,
-						timeout_ms: None,
-						filesystem: None,
+						cwd:             None,
+						env:             None,
+						timeout_ms:      None,
+						filesystem:      None,
+						output_encoding: Default::default(),
 					},
 					Some(tx),
 					cancel,

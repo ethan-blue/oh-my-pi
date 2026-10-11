@@ -2,6 +2,8 @@ import { logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./py/display";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
+import { OutputDecodeAccumulator, type OutputDecodeProvenance, RawOutputReader } from "./output-decode";
+import { TailBuffer } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
 
@@ -20,6 +22,7 @@ async function raceControlTimeout<T>(promise: Promise<T>, timeoutMs: number, rea
 export type KernelRuntimeEnv = Record<string, string | null>;
 
 export interface KernelExecuteOptions {
+	outputEncoding?: "utf8" | "gbk";
 	id?: string;
 	/** Source filename for file-backed execution and tracebacks. */
 	filename?: string;
@@ -36,7 +39,9 @@ export interface KernelExecuteOptions {
 	allowStdin?: boolean;
 }
 
-export interface KernelExecuteResult {
+export interface KernelExecuteResult extends OutputDecodeProvenance {
+	/** Kernel-scope raw output. Request ownership is deliberately not asserted. */
+	kernelOutput?: string;
 	status: "ok" | "error";
 	executionCount?: number;
 	error?: { name: string; value: string; traceback: string[] };
@@ -96,10 +101,19 @@ export type FrameType =
 	| "result"
 	| "error"
 	| "done"
+	| "raw_start"
+	| "raw_chunk"
+	| "raw_end"
+	| "raw_ack"
+	| "raw_abort"
+	| "kernel_bytes"
 	| "shadow_snapshot"
 	| "shadow_plan";
 
 export interface Frame {
+	protocol?: number;
+	stream?: string;
+	seq?: number;
 	type: FrameType;
 	id?: string;
 	data?: string;
@@ -122,6 +136,10 @@ export interface Frame {
 }
 
 interface PendingExecution {
+	rawReaders: Map<string, RawOutputReader>;
+	rawEndSequences: Map<string, number>;
+	rawTerminals: Map<string, "complete" | "failed">;
+	decodeReport: OutputDecodeAccumulator;
 	resolve: (result: KernelExecuteResult) => void;
 	options?: KernelExecuteOptions;
 	status: "ok" | "error";
@@ -222,6 +240,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#exitedPromise: Promise<number> | null = null;
 	#pending = new Map<string, PendingExecution>();
 	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
+	#kernelReader = new RawOutputReader();
+	#kernelRawObserved = false;
+	#kernelOutput = new TailBuffer(65_536);
+	#kernelOutputBytes = 0;
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
 
 	constructor(id: string, options: BaseKernelOptions<TExecuteOptions>) {
@@ -270,6 +292,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const { promise, resolve } = Promise.withResolvers<KernelExecuteResult>();
 		const pending: PendingExecution = {
+			rawReaders: new Map(),
+			rawEndSequences: new Map(),
+			rawTerminals: new Map(),
+			decodeReport: new OutputDecodeAccumulator(),
 			resolve,
 			options,
 			status: "ok",
@@ -286,7 +312,17 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			pending.settled = true;
 			this.#pending.delete(msgId);
 			cleanup();
+			pending.decodeReport.unknown(pending.rawReaders.size);
+			if (this.#kernelRawObserved) pending.decodeReport.unknown();
+			const kernelOutput = this.#kernelOutput.text();
+			const kernelOutputTruncated = this.#kernelOutputBytes > 65_536;
+			this.#kernelOutput = new TailBuffer(65_536);
+			this.#kernelOutputBytes = 0;
 			resolve({
+				...pending.decodeReport.result(),
+				kernelOutput: kernelOutput
+					? `[kernel-scope output; request ownership unknown${kernelOutputTruncated ? "; tail truncated to 65536 UTF-8 bytes" : ""}]\n${kernelOutput}`
+					: undefined,
 				status: pending.status,
 				executionCount: pending.executionCount,
 				error: pending.error,
@@ -504,17 +540,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		const kernelKilledDefault = options?.kernelKilled ?? false;
 		for (const entry of pending) {
 			if (entry.settled) continue;
-			entry.settled = true;
 			void entry.options?.onChunk?.(`[kernel] ${reason}\n`);
-			entry.resolve({
-				status: "error",
-				cancelled: true,
-				timedOut: entry.timedOut,
-				stdinRequested: entry.stdinRequested,
-				executionCount: entry.executionCount,
-				error: entry.error,
-				kernelKilled: entry.kernelKilled || kernelKilledDefault,
-			});
+			entry.status = "error";
+			entry.cancelled = true;
+			entry.kernelKilled ||= kernelKilledDefault;
+			entry.finalize?.();
 		}
 	}
 
@@ -594,7 +624,38 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		void loop();
 	}
 
+	#writeRawText(frame: Record<string, unknown>): void {
+		const stdin = this.#stdin;
+		if (!stdin) throw new Error("Raw-output response channel is closed");
+		try {
+			stdin.write(`${JSON.stringify(frame)}\n`);
+			// Keep reading stdout while replies drain: the runner's decoded-text
+			// callback also writes stdout. Awaiting flush in that same reader
+			// deadlocks duplex pipes. Runner credits bound outstanding replies.
+			void raceControlTimeout(Promise.resolve(stdin.flush()), 30_000, "Raw-output response channel stalled").catch(
+				() => {
+					void this.shutdown();
+				},
+			);
+		} catch (error) {
+			void this.shutdown();
+			throw error;
+		}
+	}
+
 	async #handleFrame(frame: Frame): Promise<void> {
+		if (frame.type === "kernel_bytes") {
+			this.#kernelRawObserved = true;
+			try {
+				if (frame.protocol !== 1) throw new Error("Invalid kernel output protocol");
+				const text = this.#kernelReader.push(frame.seq, frame.data);
+				this.#kernelOutput.append(text);
+				this.#kernelOutputBytes += Buffer.byteLength(text);
+			} catch {
+				this.#kernelOutput.append("[kernel raw output unavailable: invalid sequence or payload]\n");
+			}
+			return;
+		}
 		const rid = frame.id;
 		if (!rid) return;
 		const control = this.#pendingControls.get(rid);
@@ -606,6 +667,67 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		if (!pending) return;
 
 		switch (frame.type) {
+			case "raw_start":
+			case "raw_chunk":
+			case "raw_end":
+			case "raw_ack":
+			case "raw_abort": {
+				const stream = frame.stream ?? "";
+				try {
+					if (frame.protocol !== 1 || !stream || stream.length > 128)
+						throw new Error("Invalid raw-output protocol");
+					if (frame.type === "raw_abort") throw new Error("Runner abandoned raw-output delivery");
+					if (frame.type === "raw_start") {
+						if (
+							pending.rawReaders.has(stream) ||
+							pending.rawTerminals.has(stream) ||
+							pending.rawReaders.size >= 32 ||
+							pending.rawTerminals.size >= 1024
+						)
+							throw new Error("Duplicate or excessive raw-output readers");
+						pending.rawReaders.set(stream, new RawOutputReader(pending.options?.outputEncoding));
+						return;
+					}
+					const reader = pending.rawReaders.get(stream);
+					if (!reader) throw new Error("Raw-output reader was not started");
+					if (frame.type === "raw_ack") {
+						if (frame.seq !== pending.rawEndSequences.get(stream) || !pending.rawEndSequences.has(stream))
+							throw new Error("Raw-output delivery acknowledged without matching EOF");
+						pending.rawReaders.delete(stream);
+						pending.rawEndSequences.delete(stream);
+						pending.rawTerminals.set(stream, "complete");
+						pending.decodeReport.complete(reader.decoder);
+						return;
+					}
+					const done = frame.type === "raw_end";
+					const text = done ? reader.finish(frame.seq) : reader.push(frame.seq, frame.data);
+					if (done && frame.seq !== undefined) pending.rawEndSequences.set(stream, frame.seq);
+					this.#writeRawText({
+						type: "raw_text",
+						protocol: 1,
+						id: rid,
+						stream,
+						seq: frame.seq,
+						data: text,
+						done,
+					});
+				} catch (error) {
+					pending.rawReaders.delete(stream);
+					pending.rawEndSequences.delete(stream);
+					if (pending.rawTerminals.get(stream) !== "failed") pending.decodeReport.unknown();
+					if (pending.rawTerminals.size < 1024) pending.rawTerminals.set(stream, "failed");
+					if (frame.type === "raw_abort") return;
+					this.#writeRawText({
+						type: "raw_text",
+						protocol: 1,
+						id: rid,
+						stream,
+						done: true,
+						error: String(error),
+					});
+				}
+				return;
+			}
 			case "started":
 				return;
 			case "stdout":

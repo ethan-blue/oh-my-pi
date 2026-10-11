@@ -13,6 +13,7 @@ import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
+import type { OutputDecodeProvenance } from "./output-decode";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -64,6 +65,7 @@ export type KernelEnvPatch = Record<string, string | null | undefined>;
  * interfaces structurally extend this; the base executor only reads these.
  */
 export interface KernelExecutorBaseOptions {
+	outputEncoding?: "utf8" | "gbk";
 	cwd?: string;
 	filename?: string;
 	timeoutMs?: number;
@@ -80,7 +82,7 @@ export interface KernelExecutorBaseOptions {
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
-export interface KernelExecutionResult {
+export interface KernelExecutionResult extends OutputDecodeProvenance {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -102,6 +104,7 @@ export interface GenericKernel<TEnv> {
 	execute(
 		code: string,
 		options: {
+			outputEncoding?: "utf8" | "gbk";
 			cwd?: string;
 			filename?: string;
 			env?: TEnv;
@@ -110,13 +113,16 @@ export interface GenericKernel<TEnv> {
 			onChunk: (text: string) => Promise<void> | void;
 			onDisplay: (output: KernelDisplayOutput) => Promise<void> | void;
 		},
-	): Promise<{
-		status: "ok" | "error";
-		cancelled: boolean;
-		timedOut: boolean;
-		kernelKilled?: boolean;
-		stdinRequested?: boolean;
-	}>;
+	): Promise<
+		OutputDecodeProvenance & {
+			kernelOutput?: string;
+			status: "ok" | "error";
+			cancelled: boolean;
+			timedOut: boolean;
+			kernelKilled?: boolean;
+			stdinRequested?: boolean;
+		}
+	>;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +522,7 @@ export async function executeWithKernelBase<
 		}
 
 		const result = await kernel.execute(code, {
+			outputEncoding: options?.outputEncoding,
 			cwd: options?.cwd,
 			filename: options?.filename,
 			env: buildKernelEnvPatch(options ?? ({} as TOptions)),
@@ -524,6 +531,13 @@ export async function executeWithKernelBase<
 			onChunk: text => sink.push(text),
 			onDisplay: output => collectDisplay(output),
 		});
+		if (result.kernelOutput) sink.push(`\n${result.kernelOutput}\n`);
+		const provenance: OutputDecodeProvenance = {
+			outputEncoding: result.outputEncoding,
+			outputEncodings: result.outputEncodings,
+			outputReplacements: result.outputReplacements,
+			outputEncodingUnknownReaders: result.outputEncodingUnknownReaders,
+		};
 
 		if (result.cancelled || abortShield.abortRequested) {
 			const timedOut = result.timedOut || abortShield.timedOut;
@@ -534,6 +548,7 @@ export async function executeWithKernelBase<
 					: undefined;
 			const dumped = await sink.dump(annotation);
 			return {
+				...provenance,
 				exitCode: undefined,
 				cancelled: true,
 				truncated: dumped.truncated,
@@ -553,6 +568,7 @@ export async function executeWithKernelBase<
 		if (result.stdinRequested) {
 			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
 			return {
+				...provenance,
 				exitCode: 1,
 				cancelled: false,
 				truncated: dumped.truncated,
@@ -572,6 +588,7 @@ export async function executeWithKernelBase<
 		const exitCode = result.status === "ok" ? 0 : 1;
 		const dumped = await sink.dump();
 		return {
+			...provenance,
 			exitCode,
 			cancelled: false,
 			truncated: dumped.truncated,

@@ -21,57 +21,65 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
-use pi_shell::output_decode::OutputDecoder;
+use pi_shell::output_decode::{
+	OutputDecodeReport, OutputDecodeSummary, OutputDecoder, OutputEncodingPreference,
+};
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 
 use crate::{
 	js::into_string,
 	ps,
-	shell::{BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, pump_chunks},
+	shell::{
+		BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, parse_output_encoding, pump_chunks,
+	},
 	task,
 };
 
 /// Options for running a command in a PTY session.
 #[napi(object)]
 pub struct PtyStartOptions<'env> {
+	/// Declared output encoding; absent uses the shared automatic policy.
+	pub output_encoding: Option<String>,
 	/// Command string to execute.
-	pub command:    String,
+	pub command:         String,
 	/// Working directory for command execution.
-	pub cwd:        Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables for this command.
-	pub env:        Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling.
-	pub timeout_ms: Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:     Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// PTY column count.
-	pub cols:       Option<u16>,
+	pub cols:            Option<u16>,
 	/// PTY row count.
-	pub rows:       Option<u16>,
+	pub rows:            Option<u16>,
 	/// Shell binary to use (e.g. "sh", "bash", or an absolute path).
 	/// Defaults to "sh" if not provided.
-	pub shell:      Option<String>,
+	pub shell:           Option<String>,
 }
 
 /// Options for running an executable and argument vector in a PTY session.
 #[napi(object)]
 pub struct PtyArgvStartOptions<'env> {
+	/// Declared output encoding; absent uses the shared automatic policy.
+	pub output_encoding: Option<String>,
 	/// Executable name or path.
-	pub application: String,
+	pub application:     String,
 	/// Arguments passed directly to the executable.
-	pub args:        Vec<String>,
+	pub args:            Vec<String>,
 	/// Working directory for command execution.
-	pub cwd:         Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables for this command.
-	pub env:         Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling.
-	pub timeout_ms:  Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:      Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// PTY column count.
-	pub cols:        Option<u16>,
+	pub cols:            Option<u16>,
 	/// PTY row count.
-	pub rows:        Option<u16>,
+	pub rows:            Option<u16>,
 }
 
 /// Result of a PTY command run.
@@ -83,6 +91,10 @@ pub struct PtyRunResult {
 	pub cancelled: bool,
 	/// Whether command timed out.
 	pub timed_out: bool,
+	pub output_encoding: Option<String>,
+	pub output_replacements: Option<u32>,
+	pub output_encodings: Option<Vec<String>>,
+	pub output_encoding_unknown_readers: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -93,11 +105,12 @@ enum PtyCommand {
 
 #[derive(Clone)]
 struct PtyRunConfig {
-	command: PtyCommand,
-	cwd:     Option<String>,
-	env:     Option<HashMap<String, String>>,
-	cols:    u16,
-	rows:    u16,
+	output_encoding: OutputEncodingPreference,
+	command:         PtyCommand,
+	cwd:             Option<String>,
+	env:             Option<HashMap<String, String>>,
+	cols:            u16,
+	rows:            u16,
 }
 
 enum ReaderEvent {
@@ -191,11 +204,12 @@ impl PtySession {
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Shell { command: options.command, shell: options.shell },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			output_encoding: parse_output_encoding(options.output_encoding.as_deref())?,
+			command:         PtyCommand::Shell { command: options.command, shell: options.shell },
+			cwd:             options.cwd,
+			env:             options.env,
+			cols:            options.cols.unwrap_or(120).clamp(20, 400),
+			rows:            options.rows.unwrap_or(40).clamp(5, 200),
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -213,11 +227,15 @@ impl PtySession {
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Argv { application: options.application, args: options.args },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			output_encoding: parse_output_encoding(options.output_encoding.as_deref())?,
+			command:         PtyCommand::Argv {
+				application: options.application,
+				args:        options.args,
+			},
+			cwd:             options.cwd,
+			env:             options.env,
+			cols:            options.cols.unwrap_or(120).clamp(20, 400),
+			rows:            options.rows.unwrap_or(40).clamp(5, 200),
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -425,18 +443,23 @@ fn run_pty_sync(
 	// the child. A separate pump task `call_async`s so the control loop never
 	// waits on JS (input/resize/kill/exit stay live).
 	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+	let (reader_summary_tx, reader_summary_rx) = flume::bounded::<OutputDecodeSummary>(1);
 	let queued = reader_tx.clone();
 	let reader_thread = std::thread::spawn(move || {
 		const BUF: usize = 65536;
 		let mut buf = vec![0u8; BUF];
-		let mut decoder = OutputDecoder::new();
+		let mut decoder = OutputDecoder::with_preference(config.output_encoding);
 		// Once the pump is gone (JS failed, or a wedged `on_chunk` hit the
 		// stall timeout) keep reading and discard: the child must not block on
 		// a full PTY buffer that nothing drains (#12657).
 		let mut forwarding = true;
 		loop {
 			match reader.read(&mut buf) {
-				Ok(0) | Err(_) => break,
+				Ok(0) => break,
+				Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+				#[cfg(unix)]
+				Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+				Err(_) => return None,
 				Ok(n) if forwarding => {
 					let text = decoder.push(&buf[..n]);
 					forwarding = text.is_empty() || reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
@@ -445,13 +468,17 @@ fn run_pty_sync(
 			}
 		}
 		if !forwarding {
-			return;
+			return None;
 		}
 		let rest = decoder.finish();
 		if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
-			return;
+			return None;
 		}
-		let _ = reader_tx.send(ReaderEvent::Done);
+		let summary =
+			OutputDecodeSummary { encoding: decoder.mode(), replacements: decoder.replacements() };
+		reader_summary_tx.send(summary).ok()?;
+		reader_tx.send(ReaderEvent::Done).ok()?;
+		Some(summary)
 	});
 
 	// Pin the kill targets before the waiter thread can reap the child: after
@@ -483,11 +510,11 @@ fn run_pty_sync(
 		let _ = cancel_tx.send(ControlMessage::Cancelled { timed_out });
 	});
 	let in_js = Arc::new(AtomicBool::new(false));
-	let (pump_done_tx, pump_done_rx) = flume::bounded::<()>(1);
+	let (pump_done_tx, pump_done_rx) = flume::bounded::<bool>(1);
 	let pump_task = {
 		let in_js = Arc::clone(&in_js);
 		napi::tokio::spawn(async move {
-			pump_chunks(
+			let delivered = pump_chunks(
 				reader_rx,
 				FORWARD_STALL_TIMEOUT,
 				Some(in_js.as_ref()),
@@ -503,7 +530,7 @@ fn run_pty_sync(
 				},
 			)
 			.await;
-			let _ = pump_done_tx.send(());
+			let _ = pump_done_tx.send(delivered);
 		})
 	};
 	let abort_pump = pump_task.abort_handle();
@@ -606,7 +633,7 @@ fn run_pty_sync(
 	{
 		drop(master);
 	}
-	await_pty_output_drain(
+	let delivered = await_pty_output_drain(
 		pump_done_rx,
 		reader_thread,
 		queued,
@@ -614,8 +641,32 @@ fn run_pty_sync(
 		cancelled || timed_out,
 		|| abort_pump.abort(),
 	);
+	let summary = delivered
+		.then(|| reader_summary_rx.try_recv().ok())
+		.flatten();
 	drop(pump_task);
-	Ok(PtyRunResult { exit_code, cancelled, timed_out })
+	let mut report = OutputDecodeReport::default();
+	if let Some(summary) = summary {
+		report.record(summary);
+	} else {
+		report.record_unknown();
+	}
+	Ok(PtyRunResult {
+		exit_code,
+		cancelled,
+		timed_out,
+		output_encoding: report.uniform_encoding().map(|mode| mode.as_str()),
+		output_replacements: report.total_replacements(),
+		output_encodings: report.observed_any().then(|| {
+			report
+				.distinct_encodings()
+				.iter()
+				.map(|mode| mode.as_str())
+				.collect()
+		}),
+		output_encoding_unknown_readers: (report.unknown_count() > 0)
+			.then_some(report.unknown_count()),
+	})
 }
 
 /// Wait for the JS pump after the child has exited and the master is dropped.
@@ -634,14 +685,14 @@ fn run_pty_sync(
 /// the pump task to observe abort so `start()` does not resolve while
 /// `call_async` is still in Rust. An already-queued napi callback can still
 /// run once; TSFN work lives on the JS thread.
-fn await_pty_output_drain(
-	pump_done_rx: flume::Receiver<()>,
-	reader_thread: std::thread::JoinHandle<()>,
+fn await_pty_output_drain<T>(
+	pump_done_rx: flume::Receiver<bool>,
+	reader_thread: std::thread::JoinHandle<T>,
 	queued: flume::Sender<ReaderEvent>,
 	in_js: &AtomicBool,
 	abandon_slow_js: bool,
 	stop_pump: impl FnOnce(),
-) {
+) -> bool {
 	let mut stop_pump = Some(stop_pump);
 
 	if abandon_slow_js {
@@ -653,24 +704,30 @@ fn await_pty_output_drain(
 		if reader_thread.is_finished() {
 			let _ = reader_thread.join();
 		}
-		return;
+		return false;
 	}
 
 	loop {
 		if reader_thread.is_finished() {
 			drop(queued);
 			// Unbounded by design (#7421, same as shell.rs `drain_handle.await`).
-			let _ = pump_done_rx.recv();
+			let delivered = pump_done_rx.recv().unwrap_or(false);
 			let _ = reader_thread.join();
-			return;
+			return delivered;
 		}
 
 		match pump_done_rx.recv_timeout(STUCK_SLAVE_IDLE) {
-			Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => {
+			Ok(true) => {
 				if reader_thread.is_finished() {
 					let _ = reader_thread.join();
 				}
-				return;
+				return true;
+			},
+			Ok(false) | Err(flume::RecvTimeoutError::Disconnected) => {
+				if reader_thread.is_finished() {
+					let _ = reader_thread.join();
+				}
+				return false;
 			},
 			Err(flume::RecvTimeoutError::Timeout) => {
 				if reader_thread.is_finished() {
@@ -682,7 +739,7 @@ fn await_pty_output_drain(
 					}
 					drop(queued);
 					let _ = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT);
-					return;
+					return false;
 				}
 			},
 		}
@@ -705,6 +762,22 @@ mod reader_queue_tests {
 	};
 
 	#[test]
+	fn drain_rejects_failed_forwarding_even_after_reader_exit() {
+		let (pump_tx, pump_rx) = flume::bounded(1);
+		pump_tx.send(false).expect("failed forwarding");
+		let reader = std::thread::spawn(|| {});
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		assert!(!await_pty_output_drain(
+			pump_rx,
+			reader,
+			queued,
+			&AtomicBool::new(false),
+			false,
+			|| {}
+		));
+	}
+
+	#[test]
 	fn drain_waits_for_slow_js_after_reader_eof() {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(|| {});
@@ -712,10 +785,10 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(true);
 		});
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
+		assert!(await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {}));
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"must not time out a slow callback after reader EOF",
@@ -730,7 +803,7 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		std::thread::spawn(move || {
 			let _ = reader_rx.recv();
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(true);
 		});
 		let reader = std::thread::spawn(|| {});
 		let deadline = Instant::now() + Duration::from_secs(1);
@@ -749,7 +822,7 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_gives_up_only_on_open_slave_idle() {
-		let (_pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (_pump_tx, pump_rx) = flume::bounded::<bool>(1);
 		let reader = std::thread::spawn(|| {
 			std::thread::park();
 		});
@@ -757,9 +830,9 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {
+		assert!(!await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {
 			stopped.store(true, Ordering::Release);
-		});
+		}));
 		let elapsed = start.elapsed();
 		assert!(elapsed >= STUCK_SLAVE_IDLE);
 		assert!(elapsed < STUCK_SLAVE_IDLE + Duration::from_secs(2));
@@ -777,7 +850,7 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(true);
 		});
 		let start = Instant::now();
 		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
@@ -797,7 +870,7 @@ mod reader_queue_tests {
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
 			in_js_flag.store(false, Ordering::Release);
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(true);
 		});
 		let start = Instant::now();
 		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
@@ -809,7 +882,7 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_cancel_does_not_wait_for_slow_js() {
-		let (_pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (_pump_tx, pump_rx) = flume::bounded::<bool>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
@@ -828,7 +901,7 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_cancel_returns_once_pump_observes_stop() {
-		let (pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (pump_tx, pump_rx) = flume::bounded::<bool>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
@@ -937,14 +1010,15 @@ mod zombie_repro_tests {
 			let (tx, rx) = flume::unbounded();
 			let ct = task::CancelToken::new(Some(1), None);
 			let config = PtyRunConfig {
-				command: PtyCommand::Argv {
+				command:         PtyCommand::Argv {
 					application: STORM_CHILD_COMM.to_string(),
 					args:        vec!["5".to_string()],
 				},
-				cwd:     None,
-				env:     None,
-				cols:    80,
-				rows:    24,
+				cwd:             None,
+				env:             None,
+				cols:            80,
+				rows:            24,
+				output_encoding: OutputEncodingPreference::Auto,
 			};
 			// Pre-spawn heartbeats bail with `Err`, so `Ok` means this iteration
 			// reached the post-spawn cancellation path.

@@ -33,6 +33,7 @@ Current tool input:
   title?: string;
   timeout?: number; // seconds; default 30, 0 disables, otherwise clamped to 1..3600
   reset?: boolean;  // wipe the Python kernel before this call
+  outputEncoding?: "gbk" | "utf8"; // subprocess PIPE bytes, not ordinary str or kernel-scope fd-1
 }
 ```
 
@@ -58,6 +59,12 @@ Kernel shutdown:
 ## Wire protocol (NDJSON, host ↔ runner)
 
 One JSON object per line, UTF-8, `\n` terminated.
+
+The bundled host requests `rawOutputProtocol: 1` for execution and kernel-defined tool requests. Raw subprocess PIPE frames use `protocol: 1`, request `id`, a separate `stream`, and monotonic `seq`: `raw_start`, base64 `raw_chunk`, `raw_end`, then `raw_ack` after the runner consumes the host's decoded `raw_text` response. `raw_abort`, missing EOF or missing delivery ACK leave provenance incomplete. The host reuses native OutputDecoder; the runner does not maintain a parallel GBK detector. Standalone requests without the version-1 capability retain legacy text frames.
+
+Raw frames are limited to 65536 bytes; Python emits 8192-byte PIPE chunks with an eight-chunk credit window and a bounded EOF response wait. The host reads output while responses flush to avoid duplex pipe deadlocks. Text capture/display limits use UTF-8 bytes and do not stop PIPE draining. Cancellation and kernel death settle through the same cleanup and provenance path.
+
+`kernel_bytes` instead has no request id: it carries fd-1 bytes for the persistent kernel-scope decoder. Cell `done` does not finish that stream. Its bounded tail is displayed separately with unknown request ownership, and cannot establish a complete per-cell encoding/loss summary. Host, runner and native bindings should be updated together; arbitrary cross-version combinations are not validated here.
 
 Host → runner:
 

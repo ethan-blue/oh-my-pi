@@ -9,8 +9,12 @@ Host -> wrapper:
   {"type": "tool", "id": str, "op": "describe", "names": [str]}
   {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
   {"type": "exit"}                                # graceful shutdown
+  {"type": "raw_text", "protocol": 1, "id": ..., "stream": ..., "seq": int,
+   "data": str, "done": bool}                     # async decode response
 
 Wrapper -> host:
+  raw_start / raw_chunk / raw_end / raw_ack / raw_abort (protocol 1, stream id)
+  kernel_bytes (protocol 1, kernel-scope fd-1 bytes; no request ownership)
   {"type": "started",     "id": ...}
   {"type": "stdout",      "id": ..., "data": str}
   {"type": "stderr",      "id": ..., "data": str}
@@ -63,10 +67,10 @@ from typing import Any, Callable
 # Frames travel on a private dup of the original stdout. fd 1 itself is then
 # repointed at a capture pipe: child processes spawned by user code without
 # stdout=PIPE inherit fd 1, and their output is forwarded to the host as
-# regular stdout frames by a drain thread instead of being written raw into
+# captured frames by a drain thread instead of being written raw into
 # the NDJSON channel (where it would be dropped as invalid JSON — or worse,
-# spoof a frame). The wire protocol is unchanged: the host still reads NDJSON
-# frames from the subprocess stdout.
+# spoof a frame). The host still reads UTF-8 NDJSON. Without the optional
+# rawOutputProtocol=1 request capability, standalone consumers keep text frames.
 _RAW_STDERR = sys.__stderr__
 try:
     _FRAME_FD = os.dup(sys.__stdout__.fileno())
@@ -78,6 +82,85 @@ except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
     _RAW_STDOUT = sys.__stdout__
     _CAPTURE_READ_FD = None
 _OUT_LOCK = threading.Lock()
+
+# Version 1 is enabled per request by the host. Legacy standalone runners
+# continue using their original text protocol.
+_RAW_OUTPUT_ENABLED = contextvars.ContextVar("omp_raw_output_enabled", default=False)
+_RAW_CONTROL_LOOP_REPLIES = contextvars.ContextVar("omp_raw_control_loop_replies", default=False)
+_RAW_STREAM_IDS = itertools.count()
+_RAW_STREAMS: dict[str, Any] = {}
+_RAW_STREAMS_LOCK = threading.Lock()
+_RAW_WINDOWS_REQUESTS: list[dict] = []
+_RAW_WINDOWS_WINDOW = threading.Lock()
+_RAW_KERNEL_ENABLED = False
+
+
+class _RawTextReceiver:
+    def __init__(self, callback: Callable[[str], None]) -> None:
+        self.callback = callback
+        self.context = contextvars.copy_context()
+        self.rid = _CURRENT_RID.get()
+        self.next_seq = 0
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+        self.credits = threading.Condition()
+
+    def wait_for_credit(self, seq: int) -> None:
+        with self.credits:
+            if not self.credits.wait_for(lambda: seq - self.next_seq < 8 or self.done.is_set(), timeout=30):
+                raise RuntimeError("Host stalled the raw-output credit window")
+            if self.done.is_set():
+                raise self.error or RuntimeError("Raw-output response ended before PIPE EOF")
+
+    def accept(self, frame: dict) -> None:
+        try:
+            if frame.get("error"):
+                raise RuntimeError(str(frame["error"]))
+            if frame.get("protocol") != 1 or frame.get("id") != self.rid or frame.get("seq") != self.next_seq:
+                raise RuntimeError("Invalid raw-output response sequence")
+            self.next_seq += 1
+            text = frame.get("data", "")
+            if not isinstance(text, str):
+                raise RuntimeError("Invalid raw-output response text")
+            if text and self.error is None:
+                self.context.run(self.callback, text)
+        except BaseException as exc:
+            self.error = self.error or exc
+        if frame.get("done"):
+            self.done.set()
+        with self.credits:
+            self.credits.notify_all()
+
+
+def _accept_raw_text(req: dict) -> bool:
+    if req.get("type") != "raw_text":
+        return False
+    with _RAW_STREAMS_LOCK:
+        receiver = _RAW_STREAMS.get(str(req.get("stream", "")))
+    if receiver is not None:
+        receiver.accept(req)
+    return True
+
+
+def _read_raw_window(receiver: _RawTextReceiver) -> None:
+    # Windows cannot leave a thread blocked in sys.stdin while user imports
+    # run. This reader exists only during a synchronous shell helper and ends
+    # on that helper's EOF acknowledgement. Queued cells stay queued.
+    try:
+        while not receiver.done.is_set():
+            line = sys.__stdin__.readline()
+            if not line:
+                raise RuntimeError("Host closed the raw-output response channel")
+            req = _parse_request(line.strip())
+            if req is None:
+                continue
+            if not _accept_raw_text(req):
+                _RAW_WINDOWS_REQUESTS.append(req)
+    except BaseException as exc:
+        receiver.error = receiver.error or exc
+        receiver.done.set()
+        with receiver.credits:
+            receiver.credits.notify_all()
 
 
 def _json_default(o: Any) -> Any:
@@ -858,6 +941,7 @@ def _drain_captured_stdout() -> None:
     import codecs
 
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    seq = 0
     while True:
         try:
             chunk = os.read(_CAPTURE_READ_FD, 65536)
@@ -865,6 +949,14 @@ def _drain_captured_stdout() -> None:
             return
         if not chunk:
             return
+        if _RAW_KERNEL_ENABLED:
+            # fd 1 belongs to the kernel, not the most recently started cell.
+            # Keep bytes (including split characters and late background writes)
+            # in one host decoder for its whole lifetime. done is not EOF.
+            _emit({"type": "kernel_bytes", "protocol": 1, "seq": seq,
+                   "data": base64.b64encode(chunk).decode("ascii")})
+            seq += 1
+            continue
         text = decoder.decode(chunk)
         if not text:
             continue
@@ -1213,6 +1305,9 @@ def _stream_process_output(
     proc: subprocess.Popen, on_text: Callable[[str], None] | None = None
 ) -> None:
     assert proc.stdout is not None
+    if _RAW_OUTPUT_ENABLED.get():
+        _stream_raw_process_output(proc, on_text)
+        return
     encoding = _process_output_encoding()
     decoder = _process_output_decoder(encoding)
     limiter = _ShellOutputLimiter(
@@ -1234,6 +1329,65 @@ def _stream_process_output(
         limiter.write(tail)
         if on_text is not None:
             on_text(tail)
+
+
+def _stream_raw_process_output(
+    proc: subprocess.Popen, on_text: Callable[[str], None] | None
+) -> None:
+    limiter = _ShellOutputLimiter(
+        max_bytes=_SHELL_OUTPUT_MAX_BYTES,
+        max_lines=_SHELL_OUTPUT_MAX_LINES,
+        encoding="utf-8",
+    )
+
+    def consume(text: str) -> None:
+        limiter.write(text)
+        if on_text is not None:
+            on_text(text)
+
+    rid = _CURRENT_RID.get()
+    stream = f"pipe-{next(_RAW_STREAM_IDS)}"
+    receiver = _RawTextReceiver(consume)
+    with _RAW_STREAMS_LOCK:
+        _RAW_STREAMS[stream] = receiver
+    reader = None
+    if os.name == "nt" and not _RAW_CONTROL_LOOP_REPLIES.get():
+        _RAW_WINDOWS_WINDOW.acquire()
+        reader = threading.Thread(target=_read_raw_window, args=(receiver,), daemon=True)
+        reader.start()
+    seq = 0
+    acknowledged = False
+    try:
+        _emit({"type": "raw_start", "protocol": 1, "id": rid, "stream": stream})
+        while True:
+            chunk = os.read(proc.stdout.fileno(), _SHELL_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            receiver.wait_for_credit(seq)
+            _emit({"type": "raw_chunk", "protocol": 1, "id": rid, "stream": stream,
+                   "seq": seq, "data": base64.b64encode(chunk).decode("ascii")})
+            seq += 1
+        _emit({"type": "raw_end", "protocol": 1, "id": rid, "stream": stream, "seq": seq})
+        # One barrier per stream, never a synchronous tool RPC per chunk.
+        # The response reader consumes text concurrently with pipe draining.
+        if not receiver.done.wait(30):
+            raise RuntimeError("Host did not acknowledge raw-output EOF")
+        if receiver.error is not None:
+            raise receiver.error
+        _emit({"type": "raw_ack", "protocol": 1, "id": rid, "stream": stream, "seq": seq})
+        acknowledged = True
+    finally:
+        if reader is not None:
+            # Do not resume user imports with a blocked Windows stdin reader.
+            # Transport loss/timeout cannot safely reuse this kernel.
+            if not receiver.done.is_set():
+                os._exit(74)
+            reader.join()
+            _RAW_WINDOWS_WINDOW.release()
+        with _RAW_STREAMS_LOCK:
+            _RAW_STREAMS.pop(stream, None)
+        if not acknowledged:
+            _emit({"type": "raw_abort", "protocol": 1, "id": rid, "stream": stream})
 
 
 class _BoundedTextCapture:
@@ -1599,7 +1753,8 @@ def __omp_shell(cmd: str) -> _ShellResult:
         stderr=subprocess.STDOUT,
     )
     capture = _BoundedTextCapture(
-        _SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES, _process_output_encoding()
+        _SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES,
+        "utf-8" if _RAW_OUTPUT_ENABLED.get() else _process_output_encoding()
     )
     _stream_process_output(proc, capture.add)
     proc.wait()
@@ -2113,6 +2268,8 @@ def _handle_tool_request(req: dict) -> None:
     """Describe or invoke a kernel-defined tool on a dedicated runner thread."""
     rid = str(req.get("id"))
     token = _CURRENT_RID.set(rid)
+    raw_token = _RAW_OUTPUT_ENABLED.set(req.get("rawOutputProtocol") == 1)
+    control_token = _RAW_CONTROL_LOOP_REPLIES.set(True)
     status = "ok"
     _emit({"type": "started", "id": rid})
     try:
@@ -2152,13 +2309,19 @@ def _handle_tool_request(req: dict) -> None:
             }
         )
         _CURRENT_RID.reset(token)
+        _RAW_OUTPUT_ENABLED.reset(raw_token)
+        _RAW_CONTROL_LOOP_REPLIES.reset(control_token)
 
 
 async def _handle_request_async(req: dict) -> None:
+    global _RAW_KERNEL_ENABLED
     rid = str(req.get("id"))
     execution_reserved = bool(req.pop("_execution_reserved", False))
     execution_started = False
     token = _CURRENT_RID.set(rid)
+    raw_token = _RAW_OUTPUT_ENABLED.set(req.get("rawOutputProtocol") == 1)
+    if _RAW_OUTPUT_ENABLED.get():
+        _RAW_KERNEL_ENABLED = True
     displayed_matplotlib_token = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.set(set())
     _STATE.capture_rid = rid
     reset_call_occurrences = _STATE.user_ns.get("__omp_reset_call_occurrences__")
@@ -2254,6 +2417,7 @@ async def _handle_request_async(req: dict) -> None:
             _STATE.capture_rid = None
         _flush_stream_proxies(rid)
         _CURRENT_RID.reset(token)
+        _RAW_OUTPUT_ENABLED.reset(raw_token)
         _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.reset(displayed_matplotlib_token)
         if execution_reserved and not execution_started:
             _end_exec_sigint()
@@ -2355,6 +2519,8 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         req = _parse_request(line)
         if req is None:
             continue
+        if _accept_raw_text(req):
+            continue
         if req.get("type") == "tool":
             threading.Thread(
                 target=_handle_tool_request,
@@ -2436,14 +2602,19 @@ async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
     import outright.
     """
     while True:
-        raw_line = await loop.run_in_executor(None, stdin.readline)
-        if not raw_line:
-            break  # EOF: the host closed the control channel.
-        line = raw_line.strip()
-        if not line:
-            continue
-        req = _parse_request(line)
+        if _RAW_WINDOWS_REQUESTS:
+            req = _RAW_WINDOWS_REQUESTS.pop(0)
+        else:
+            raw_line = await loop.run_in_executor(None, stdin.readline)
+            if not raw_line:
+                break  # EOF: the host closed the control channel.
+            line = raw_line.strip()
+            if not line:
+                continue
+            req = _parse_request(line)
         if req is None:
+            continue
+        if _accept_raw_text(req):
             continue
         if req.get("type") == "exit":
             break

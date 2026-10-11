@@ -36,7 +36,9 @@ use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::{GitLayers, git_builtin},
 	minimizer,
-	output_decode::OutputDecoder,
+	output_decode::{
+		OutputDecodeReport, OutputDecodeSummary, OutputDecoder, OutputEncodingPreference,
+	},
 	process,
 };
 
@@ -117,22 +119,28 @@ pub struct ShellOptions {
 }
 
 struct ShellRunConfig {
-	command:    String,
-	cwd:        Option<String>,
-	env:        Option<HashMap<String, String>>,
-	minimizer:  Option<minimizer::MinimizerConfig>,
+	command:         String,
+	cwd:             Option<String>,
+	env:             Option<HashMap<String, String>>,
+	minimizer:       Option<minimizer::MinimizerConfig>,
 	/// Replaces the session filesystem for this run only.
-	filesystem: Option<Fs>,
+	filesystem:      Option<Fs>,
+	/// Declared encoding of the run's captured output stream.
+	output_encoding: OutputEncodingPreference,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellRunOptions {
-	pub command:    String,
-	pub cwd:        Option<String>,
-	pub env:        Option<HashMap<String, String>>,
-	pub timeout_ms: Option<u32>,
+	pub command:         String,
+	pub cwd:             Option<String>,
+	pub env:             Option<HashMap<String, String>>,
+	pub timeout_ms:      Option<u32>,
 	/// Filesystem for this run only; the session filesystem when `None`.
-	pub filesystem: Option<Fs>,
+	pub filesystem:      Option<Fs>,
+	/// Encoding the run's output decodes with: `Auto` (default) is UTF-8 with
+	/// the host ANSI code page as fallback, `Utf8` never falls back, `Gbk`
+	/// decodes the whole stream as CP936. The result reports what was used.
+	pub output_encoding: OutputEncodingPreference,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -146,27 +154,72 @@ pub struct MinimizerResult {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
-	pub exit_code:   Option<i32>,
-	pub cancelled:   bool,
-	pub timed_out:   bool,
-	pub minimized:   Option<MinimizerResult>,
+	pub exit_code: Option<i32>,
+	pub cancelled: bool,
+	pub timed_out: bool,
+	pub minimized: Option<MinimizerResult>,
 	pub working_dir: Option<String>,
+	/// The ONE encoding every settled output reader used (`"utf8"`, `"gbk"`,
+	/// or `"cp<N>"` for a Windows ANSI fallback page). `None` when readers
+	/// disagreed (see `output_encodings`) or any reader finished without a
+	/// summary (see `output_encoding_unknown_readers`).
+	#[serde(default)]
+	pub output_encoding: Option<String>,
+	/// Distinct encodings among the settled output readers, first-seen order —
+	/// one entry per captured stream/chain segment. `None` when nothing was
+	/// observed.
+	#[serde(default)]
+	pub output_encodings: Option<Vec<String>>,
+	/// Undecodable byte sequences substituted across all settled readers;
+	/// `None` while any reader is unobserved.
+	#[serde(default)]
+	pub output_replacements: Option<u32>,
+	/// Captured output readers that finished WITHOUT a decode summary (killed
+	// at shutdown, pipe registration failure). `None` when every reader
+	/// settled.
+	#[serde(default)]
+	pub output_encoding_unknown_readers: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellExecuteOptions {
-	pub command:       String,
-	pub cwd:           Option<String>,
-	pub env:           Option<HashMap<String, String>>,
-	pub session_env:   Option<HashMap<String, String>>,
-	pub timeout_ms:    Option<u32>,
-	pub snapshot_path: Option<String>,
-	pub minimizer:     Option<minimizer::MinimizerOptions>,
+	pub command:         String,
+	pub cwd:             Option<String>,
+	pub env:             Option<HashMap<String, String>>,
+	pub session_env:     Option<HashMap<String, String>>,
+	pub timeout_ms:      Option<u32>,
+	pub snapshot_path:   Option<String>,
+	pub minimizer:       Option<minimizer::MinimizerOptions>,
 	/// Filesystem backing the command (native by default).
-	pub filesystem:    Fs,
+	pub filesystem:      Fs,
+	/// Declared encoding of the captured output stream (see
+	/// [`ShellRunOptions::output_encoding`]).
+	pub output_encoding: OutputEncodingPreference,
 }
 
 pub type ShellExecuteResult = ShellRunResult;
+
+impl ShellRunResult {
+	/// Fill the decode-provenance fields of a completed run from `report`:
+	/// the uniform encoding only when every settled reader agrees and none is
+	/// missing, the distinct observed encodings (mixed sources stay visible),
+	/// the replacement total only under complete observation, and the count
+	/// of readers that finished without a summary.
+	fn with_provenance(mut self, report: &OutputDecodeReport) -> Self {
+		self.output_encoding = report.uniform_encoding().map(|mode| mode.as_str());
+		self.output_encodings = report.observed_any().then(|| {
+			report
+				.distinct_encodings()
+				.into_iter()
+				.map(|mode| mode.as_str())
+				.collect()
+		});
+		self.output_replacements = report.total_replacements();
+		self.output_encoding_unknown_readers =
+			(report.unknown_count() > 0).then_some(report.unknown_count());
+		self
+	}
+}
 
 /// Spawn registry of the run currently executing on a [`Shell`], if any.
 ///
@@ -237,11 +290,12 @@ impl Shell {
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
-			command:    options.command,
-			cwd:        options.cwd,
-			env:        options.env,
-			minimizer:  self.config.minimizer.clone(),
-			filesystem: options.filesystem,
+			command:         options.command,
+			cwd:             options.cwd,
+			env:             options.env,
+			minimizer:       self.config.minimizer.clone(),
+			filesystem:      options.filesystem,
+			output_encoding: options.output_encoding,
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -323,6 +377,7 @@ pub async fn execute_shell(
 		env: options.env,
 		minimizer,
 		filesystem: None,
+		output_encoding: options.output_encoding,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -356,11 +411,14 @@ pub async fn execute_shell_streams(
 		filesystem:    options.filesystem,
 	};
 	let run_config = ShellRunConfig {
-		command:    options.command,
-		cwd:        options.cwd,
-		env:        options.env,
-		minimizer:  None,
-		filesystem: None,
+		command:         options.command,
+		cwd:             options.cwd,
+		env:             options.env,
+		minimizer:       None,
+		filesystem:      None,
+		// Raw byte sinks never decode, so no encoding provenance exists; the
+		// consumer that decodes owns that reporting.
+		output_encoding: OutputEncodingPreference::Auto,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -452,6 +510,10 @@ async fn run_shell_session(
 				timed_out:   matches!(reason, AbortReason::Timeout),
 				minimized:   None,
 				working_dir: None,
+				output_encoding: None,
+				output_encodings: None,
+				output_replacements: None,
+				output_encoding_unknown_readers: None,
 			});
 		}
 	};
@@ -465,14 +527,19 @@ async fn run_shell_session(
 	if !keepalive {
 		*session.lock().await = None;
 	}
-	let (exec, minimized, working_dir) = res?;
+	let (exec, minimized, working_dir, decode) = res?;
 	Ok(ShellRunResult {
 		exit_code: Some(exit_code(&exec)),
 		cancelled: false,
 		timed_out: false,
 		working_dir,
 		minimized,
-	})
+		output_encoding: None,
+		output_encodings: None,
+		output_replacements: None,
+		output_encoding_unknown_readers: None,
+	}
+	.with_provenance(&decode))
 }
 
 async fn run_shell_oneshot(
@@ -522,6 +589,10 @@ async fn run_shell_oneshot(
 				timed_out:   matches!(reason, AbortReason::Timeout),
 				minimized:   None,
 				working_dir: None,
+				output_encoding: None,
+				output_encodings: None,
+				output_replacements: None,
+				output_encoding_unknown_readers: None,
 			});
 		},
 	};
@@ -530,14 +601,19 @@ async fn run_shell_oneshot(
 	let _ = process_cancel_bridge.await;
 	let res = run_result
 		.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	let (exec, minimized, working_dir) = res?;
+	let (exec, minimized, working_dir, decode) = res?;
 	Ok(ShellExecuteResult {
 		exit_code: Some(exit_code(&exec)),
 		cancelled: false,
 		timed_out: false,
 		working_dir,
 		minimized,
-	})
+		output_encoding: None,
+		output_encodings: None,
+		output_replacements: None,
+		output_encoding_unknown_readers: None,
+	}
+	.with_provenance(&decode))
 }
 
 async fn run_shell_oneshot_streams(
@@ -588,6 +664,10 @@ async fn run_shell_oneshot_streams(
 				timed_out: matches!(reason, AbortReason::Timeout),
 				minimized: None,
 				working_dir: None,
+				output_encoding: None,
+				output_encodings: None,
+				output_replacements: None,
+				output_encoding_unknown_readers: None,
 			});
 		},
 	};
@@ -603,6 +683,12 @@ async fn run_shell_oneshot_streams(
 		timed_out: false,
 		working_dir,
 		minimized: None,
+		// Raw byte sinks never decode; the consumer that decodes owns that
+		// provenance.
+		output_encoding: None,
+		output_encodings: None,
+		output_replacements: None,
+		output_encoding_unknown_readers: None,
 	})
 }
 
@@ -942,6 +1028,9 @@ struct CommandRunOutput {
 	buffered:       Option<BufferedOutput>,
 	/// A command reported an error yet went on, so the exit status hides it.
 	reported_error: bool,
+	/// Provenance of this command's output pipe decode (which encodings, how
+	/// many substitutions, and whether the reader settled at all).
+	decode:         OutputDecodeReport,
 }
 
 struct ChainCapture {
@@ -1028,7 +1117,7 @@ async fn run_shell_command(
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
+) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>, OutputDecodeReport)> {
 	install_run_filesystem(session, options, &cancel_token);
 	let result =
 		run_shell_command_in_filesystem(session, options, on_chunk, cancel_token, spawn_registry)
@@ -1043,7 +1132,7 @@ async fn run_shell_command_in_filesystem(
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
+) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>, OutputDecodeReport)> {
 	if let Some(cwd) = options.cwd.as_deref() {
 		set_shell_working_dir_if_changed(&mut session.shell, cwd).await?;
 	}
@@ -1082,9 +1171,9 @@ async fn run_shell_command_in_filesystem(
 			.map_err(|err| Error::msg(format!("Failed to pop env scope: {err}")))?;
 	}
 
-	result.map(|(exec, minimized)| {
+	result.map(|(exec, minimized, decode)| {
 		let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
-		(exec, minimized, working_dir)
+		(exec, minimized, working_dir, decode)
 	})
 }
 
@@ -1095,7 +1184,7 @@ async fn run_shell_command_single(
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
+) -> Result<(ExecutionResult, Option<MinimizerResult>, OutputDecodeReport)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 
 	let params = session.shell.default_exec_params();
@@ -1118,6 +1207,7 @@ async fn run_shell_command_single(
 		cancel_token,
 		spawn_registry,
 		capture_mode,
+		options.output_encoding,
 	)
 	.await?;
 
@@ -1172,7 +1262,7 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((command_run.result, minimized_out))
+	Ok((command_run.result, minimized_out, command_run.decode))
 }
 
 async fn run_shell_command_segmented_chain(
@@ -1181,7 +1271,7 @@ async fn run_shell_command_segmented_chain(
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
-) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
+) -> Result<(ExecutionResult, Option<MinimizerResult>, OutputDecodeReport)> {
 	let Some(config) = options.minimizer.as_ref() else {
 		return run_shell_command_single(
 			session,
@@ -1226,9 +1316,18 @@ async fn run_shell_command_segmented_chain(
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_result = None;
+	// Provenance of EVERY executed segment's captured output: a `;`/`&&` chain
+	// runs one output reader per segment and each segment's text reaches the
+	// user output and the ChainCapture, so all of them — not just the last —
+	// own a share of the result's decode provenance. (Pipelines are not
+	// segmented here: the kernel pipes carry the intermediate bytes and only
+	// the final stage's stdout is captured.)
+	let mut chain_report = OutputDecodeReport::default();
 	let max_capture_bytes = config.max_capture_bytes as usize;
 	for segment in segments {
 		if segment.run_if_previous_succeeded && !previous_succeeded {
+			// A skipped segment never starts a reader, so it contributes
+			// nothing — neither a summary nor an unknown.
 			continue;
 		}
 
@@ -1248,8 +1347,10 @@ async fn run_shell_command_segmented_chain(
 			cancel_token.clone(),
 			spawn_registry.clone(),
 			capture_mode,
+			options.output_encoding,
 		)
 		.await?;
+		chain_report.merge(command_run.decode);
 
 		let exit = exit_code(&command_run.result);
 		previous_succeeded = exit == 0;
@@ -1318,7 +1419,7 @@ async fn run_shell_command_segmented_chain(
 	// path and `apply_shell_minimizer`. (Previously a `too-large` result with
 	// empty `text` was emitted, a footgun for consumers keying off presence.)
 
-	Ok((result, minimized_out))
+	Ok((result, minimized_out, chain_report))
 }
 
 async fn run_shell_command_once(
@@ -1329,6 +1430,7 @@ async fn run_shell_command_once(
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
 	capture_mode: CommandCaptureMode,
+	output_encoding: OutputEncodingPreference,
 ) -> Result<CommandRunOutput> {
 	let (reader_file, writer_file) = pipe_to_files("output")?;
 
@@ -1368,14 +1470,21 @@ async fn run_shell_command_once(
 						reader_cancel,
 						activity_tx,
 						max_capture_bytes,
+						output_encoding,
 					)
 					.await;
 					Result::<OutputRead>::Ok(OutputRead::Buffered(output))
 				},
 				CommandCaptureMode::Streaming => {
-					Box::pin(read_output(reader_file, reader_callback, reader_cancel, activity_tx))
-						.await;
-					Result::<OutputRead>::Ok(OutputRead::Streaming)
+					let summary = Box::pin(read_output(
+						reader_file,
+						reader_callback,
+						reader_cancel,
+						activity_tx,
+						output_encoding,
+					))
+					.await;
+					Result::<OutputRead>::Ok(OutputRead::Streaming(summary))
 				},
 			}
 		}
@@ -1465,12 +1574,31 @@ async fn run_shell_command_once(
 	let _ = cancel_bridge.await;
 
 	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+	let mut decode = OutputDecodeReport::default();
 	let buffered = match reader_output {
-		Some(OutputRead::Buffered(output)) => Some(output),
-		Some(OutputRead::Streaming) | None => None,
+		Some(OutputRead::Buffered(output)) => {
+			match output.decode {
+				Some(summary) => decode.record(summary),
+				None => decode.record_unknown(),
+			}
+			Some(output)
+		},
+		Some(OutputRead::Streaming(summary)) => {
+			match summary {
+				Some(summary) => decode.record(summary),
+				None => decode.record_unknown(),
+			}
+			None
+		},
+		// The reader never settled (killed at the shutdown timeout): no
+		// provenance may be claimed for it.
+		None => {
+			decode.record_unknown();
+			None
+		},
 	};
 	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
-	Ok(CommandRunOutput { result, buffered, reported_error })
+	Ok(CommandRunOutput { result, buffered, reported_error, decode })
 }
 
 async fn run_shell_command_streams(
@@ -1933,7 +2061,9 @@ const fn session_keepalive(result: &ExecutionResult) -> bool {
 }
 
 enum OutputRead {
-	Streaming,
+	/// The reader settled; `None` inside means it produced no summary (never
+	/// decoded anything observable).
+	Streaming(Option<OutputDecodeSummary>),
 	Buffered(BufferedOutput),
 }
 
@@ -1941,6 +2071,9 @@ struct BufferedOutput {
 	text:        String,
 	input_bytes: usize,
 	exceeded:    bool,
+	/// Provenance of the capture's decode; `None` when the reader could not
+	/// even be registered.
+	decode:      Option<OutputDecodeSummary>,
 }
 
 async fn read_output(
@@ -1948,14 +2081,16 @@ async fn read_output(
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
-) {
+	output_encoding: OutputEncodingPreference,
+) -> Option<OutputDecodeSummary> {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = OutputDecoder::with_preference(output_encoding);
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
-		return;
+		// No bytes are decoded; the caller must not claim any provenance.
+		return None;
 	};
 	#[cfg(not(unix))]
 	let reader = tokio::fs::File::from_std(reader);
@@ -2006,6 +2141,7 @@ async fn read_output(
 	if !rest.is_empty() {
 		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
+	Some(OutputDecodeSummary { encoding: decoder.mode(), replacements: decoder.replacements() })
 }
 
 async fn read_output_buffered(
@@ -2014,6 +2150,7 @@ async fn read_output_buffered(
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 	max_capture_bytes: usize,
+	output_encoding: OutputEncodingPreference,
 ) -> BufferedOutput {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
@@ -2023,11 +2160,18 @@ async fn read_output_buffered(
 	let mut captured = String::new();
 	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = OutputDecoder::with_preference(output_encoding);
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
-		return BufferedOutput { text: String::new(), input_bytes: 0, exceeded: true };
+		return BufferedOutput {
+			text:        String::new(),
+			input_bytes: 0,
+			exceeded:    true,
+			// The pipe could not be registered: nothing was decoded, so no
+			// provenance may be claimed.
+			decode:      None,
+		};
 	};
 	#[cfg(not(unix))]
 	let reader = tokio::fs::File::from_std(reader);
@@ -2096,7 +2240,15 @@ async fn read_output_buffered(
 		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: captured, input_bytes, exceeded }
+	BufferedOutput {
+		text: captured,
+		input_bytes,
+		exceeded,
+		decode: Some(OutputDecodeSummary {
+			encoding:     decoder.mode(),
+			replacements: decoder.replacements(),
+		}),
+	}
 }
 
 #[cfg(unix)]
@@ -7198,7 +7350,13 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let (reader, _writer) = pipe_to_files("test").expect("test pipe should be created");
 		let cancel = CancellationToken::new();
 		let (activity_tx, _activity_rx) = flume::bounded(1);
-		let handle = tokio::spawn(read_output(reader, None, cancel.clone(), activity_tx));
+		let handle = tok::spawn(read_output(
+			reader,
+			None,
+			cancel.clone(),
+			activity_tx,
+			OutputEncodingPreference::Auto,
+		));
 
 		time::sleep(Duration::from_millis(10)).await;
 		cancel.cancel();
@@ -7392,6 +7550,126 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(pid.parse::<i32>().is_ok_and(|pid| pid > 0), "invalid PID output: {out:?}");
 	}
 
+	/// A `;` chain with the minimizer on runs one output reader per segment;
+	/// the result's provenance must aggregate EVERY segment, not just the last
+	/// (the GBK-emitting segment's replacements used to be lost to the final
+	/// segment's clean summary).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn chain_provenance_aggregates_every_segment() {
+		let command = "printf '\\326\\320\\316\\304\\n'; printf 'done\\n'";
+		for minimizer_enabled in [false, true] {
+			let (tx, rx) = flume::unbounded::<String>();
+			let result = execute_shell(
+				ShellExecuteOptions {
+					command: command.to_string(),
+					output_encoding: OutputEncodingPreference::Utf8,
+					minimizer: Some(minimizer::MinimizerOptions {
+						enabled: Some(minimizer_enabled),
+						..Default::default()
+					}),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("execute should succeed");
+			assert_eq!(result.exit_code, Some(0));
+			let mut out = String::new();
+			while let Ok(chunk) = rx.recv_async().await {
+				out.push_str(&chunk);
+			}
+			assert_eq!(out, "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\ndone\n");
+			assert_eq!(result.output_encoding.as_deref(), Some("utf8"));
+			assert_eq!(result.output_encodings, Some(vec!["utf8".to_owned()]));
+			assert_eq!(result.output_replacements, Some(4));
+			assert_eq!(result.output_encoding_unknown_readers, None);
+		}
+	}
+
+	/// A skipped `&&` segment never starts a reader, so it contributes neither
+	/// a summary nor an unknown reader.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn chain_provenance_ignores_skipped_segments() {
+		let command = "printf '\\326\\320\\316\\304\\n' && false && printf 'never\\n'";
+		let (tx, rx) = flume::unbounded::<String>();
+		let result = execute_shell(
+			ShellExecuteOptions {
+				command: command.to_string(),
+				output_encoding: OutputEncodingPreference::Utf8,
+				minimizer: Some(minimizer::MinimizerOptions {
+					enabled: Some(true),
+					..Default::default()
+				}),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("execute should succeed");
+		let mut out = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			out.push_str(&chunk);
+		}
+		assert_eq!(out, "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\n");
+		assert_eq!(result.output_encoding.as_deref(), Some("utf8"));
+		assert_eq!(result.output_replacements, Some(4));
+		assert_eq!(result.output_encoding_unknown_readers, None);
+	}
+
+	/// When an output reader produces no summary (e.g. killed before completion,
+	/// reader handle aborted or pipe registration failure), `with_provenance`
+	/// must withhold both the uniform encoding and the replacement count, keep
+	/// any observed encodings, and record the unknown reader count.
+	#[test]
+	fn provenance_with_unknown_readers_withholds_totals_and_uniform() {
+		let mut report = OutputDecodeReport::default();
+		report.record(OutputDecodeSummary {
+			encoding:     crate::output_decode::OutputDecodeMode::Utf8,
+			replacements: 2,
+		});
+		report.record_unknown();
+
+		let result = ShellRunResult {
+			exit_code: Some(0),
+			cancelled: false,
+			timed_out: false,
+			working_dir: None,
+			minimized: None,
+			output_encoding: None,
+			output_encodings: None,
+			output_replacements: None,
+			output_encoding_unknown_readers: None,
+		}
+		.with_provenance(&report);
+
+		assert_eq!(result.output_encoding, None);
+		assert_eq!(result.output_replacements, None);
+		assert_eq!(result.output_encodings, Some(vec!["utf8".to_owned()]));
+		assert_eq!(result.output_encoding_unknown_readers, Some(1));
+
+		let mut all_unknown = OutputDecodeReport::default();
+		all_unknown.record_unknown();
+		let result_all_unknown = ShellRunResult {
+			exit_code: Some(0),
+			cancelled: false,
+			timed_out: false,
+			working_dir: None,
+			minimized: None,
+			output_encoding: None,
+			output_encodings: None,
+			output_replacements: None,
+			output_encoding_unknown_readers: None,
+		}
+		.with_provenance(&all_unknown);
+
+		assert_eq!(result_all_unknown.output_encoding, None);
+		assert_eq!(result_all_unknown.output_replacements, None);
+		assert_eq!(result_all_unknown.output_encodings, None);
+		assert_eq!(result_all_unknown.output_encoding_unknown_readers, Some(1));
+	}
+
 	/// `nohup` with no operand mirrors coreutils: a `missing operand` diagnostic
 	/// and exit code 125 (a nohup-level error, distinct from any command code).
 	#[tokio::test(flavor = "multi_thread")]
@@ -7412,8 +7690,53 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	/// Output-decode provenance: an explicit GBK preference decodes the whole
+	/// stream as CP936 and the result says so; an explicit UTF-8 preference
+	/// keeps the same bytes as U+FFFD and counts every replacement.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn output_encoding_preference_decodes_and_reports() {
+		// printf's octal escapes emit the GBK bytes for 中文 plus LF.
+		let command = "printf '\\326\\320\\316\\304\\n'";
+
+		let (tx, rx) = flume::unbounded::<String>();
+		let options = ShellExecuteOptions {
+			command: command.to_string(),
+			output_encoding: OutputEncodingPreference::Gbk,
+			..Default::default()
+		};
+		let result = execute_shell(options, Some(tx), CancelToken::default())
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(0));
+		let mut out = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			out.push_str(&chunk);
+		}
+		assert_eq!(out, "中文\n");
+		assert_eq!(result.output_encoding.as_deref(), Some("gbk"));
+		assert_eq!(result.output_replacements, Some(0));
+
+		let (tx, rx) = flume::unbounded::<String>();
+		let options = ShellExecuteOptions {
+			command: command.to_string(),
+			output_encoding: OutputEncodingPreference::Utf8,
+			..Default::default()
+		};
+		let result = execute_shell(options, Some(tx), CancelToken::default())
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(0));
+		let mut out = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			out.push_str(&chunk);
+		}
+		assert_eq!(out, "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\n");
+		assert_eq!(result.output_encoding.as_deref(), Some("utf8"));
+		assert_eq!(result.output_replacements, Some(4));
+	}
+
 	/// The contract that makes this a *builtin* and not the external tool: the
-	/// child must **not** inherit `SIGHUP = SIG_IGN`. Real `nohup` masks SIGHUP
+	/// child must **not** inherit SIGHUP = SIG_IGN. Real `nohup` masks SIGHUP
 	/// (and it survives `exec`), so a process launched through `/usr/bin/nohup`
 	/// reports `IGN` here; the builtin runs the command as an ordinary
 	/// descendant, so it reports `DFL` and dies with the host on hangup. The

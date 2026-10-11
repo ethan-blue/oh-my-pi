@@ -5,6 +5,7 @@
 ### Added
 
 - Added streaming output callbacks to managed process execution without retaining complete stdout.
+- Added an injectable `outputDecoder` factory to managed process execution, so callers capture stdout/stderr with one shared decode policy instead of the default UTF-8-only `TextDecoder`.
 ## [18.8.7] - 2026-10-09
 
 ### Added

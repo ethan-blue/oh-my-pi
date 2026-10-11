@@ -11,6 +11,7 @@ pub mod windows;
 pub use brush_core::commands::{ChildSessionAction, child_session_action};
 // Reuse brush's Windows path spellings for host paths presented by the CLI.
 pub use brush_core::sys::fs::{expand_to_long_path, get_short_path};
+pub use output_decode::{OutputDecodeMode, OutputDecodeSummary, OutputEncodingPreference};
 // Re-exported for `pi-natives`: the builtins live in `pi-builtins`,
 // but the native layer only ever depends on the shell.
 pub use pi_builtins::{

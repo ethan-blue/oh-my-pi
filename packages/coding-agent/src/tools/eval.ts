@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import { formatOutputEncodingNotice } from "../eval/output-decode";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -102,6 +103,9 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 }
 
 const evalCellCommonFields = {
+	"outputEncoding?": type("'utf8' | 'gbk'").describe(
+		"Encoding of captured Python shell-helper PIPE bytes and JavaScript stdio byte writes. Omit for automatic UTF-8-first decoding. Python's shared fd-1 pipe remains kernel-scoped with automatic decoding and unknown request ownership; ordinary strings are unchanged.",
+	),
 	code: type("string").describe("Code or standalone % command; top-level await works."),
 	"title?": type("string").describe("Short transcript label."),
 	"timeout?": type("number").describe("Cell deadline in seconds; 0 disables it."),
@@ -284,6 +288,7 @@ interface ResolvedBackend {
 }
 
 interface ResolvedEvalCell {
+	outputEncoding?: "utf8" | "gbk";
 	index: number;
 	title?: string;
 	code: string;
@@ -563,6 +568,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			{
 				index: 0,
 				title: params.title,
+				outputEncoding: params.outputEncoding,
 				...source,
 				displayCode: params.code,
 				environmentChange: source.environment !== undefined,
@@ -957,6 +963,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				let result: ExecutorBackendResult;
 				try {
 					result = await backend.execute(cell.code, {
+						outputEncoding: cell.outputEncoding,
 						cwd: session.cwd,
 						sessionId,
 						sessionFile: sessionFile ?? undefined,
@@ -1058,7 +1065,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					}
 				}
 
-				const runtimeOutput = result.output.trim();
+				const decodeNotice = formatOutputEncodingNotice(
+					result.outputEncoding,
+					result.outputEncodings,
+					result.outputReplacements,
+					result.outputEncodingUnknownReaders,
+				);
+				if (decodeNotice) outputSink!.push(`\n[${decodeNotice}]\n`, { emitInline: false });
+				const runtimeOutput = [result.output.trim(), decodeNotice ? `[${decodeNotice}]` : ""]
+					.filter(Boolean)
+					.join("\n");
 				const stdoutTrimmed =
 					cell.environmentChange && result.exitCode === 0
 						? `${runtimeOutput ? `${runtimeOutput}\n` : ""}Eval environment: ${cell.environment}.`
@@ -1072,6 +1088,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						? `${stdoutTrimmed}\n\n${visibleDisplayText}`
 						: stdoutTrimmed || visibleDisplayText;
 				cellResult.output = cellOutput;
+				cellResult.outputEncoding = result.outputEncoding;
+				cellResult.outputEncodings = result.outputEncodings;
+				cellResult.outputReplacements = result.outputReplacements;
+				cellResult.outputEncodingUnknownReaders = result.outputEncodingUnknownReaders;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
 				cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;

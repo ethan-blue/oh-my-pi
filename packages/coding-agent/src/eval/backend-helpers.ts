@@ -6,26 +6,33 @@
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ExecutorBackendResult } from "./backend";
 import type { EvalDisplayOutput } from "./types";
+import type { OutputDecodeProvenance } from "./output-decode";
 
 export function namespaceSessionId(sessionId: string, prefix: string): string {
 	return sessionId.startsWith(prefix) ? sessionId : `${prefix}${sessionId}`;
 }
 
-export function toExecutorBackendResult(result: {
-	output: string;
-	exitCode: number | undefined;
-	cancelled: boolean;
-	truncated: boolean;
-	artifactId?: string | undefined;
-	artifactElidedBytes?: number;
-	artifactError?: OutputArtifactError;
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	displayOutputs: EvalDisplayOutput[];
-}): ExecutorBackendResult {
+export function toExecutorBackendResult(
+	result: OutputDecodeProvenance & {
+		output: string;
+		exitCode: number | undefined;
+		cancelled: boolean;
+		truncated: boolean;
+		artifactId?: string | undefined;
+		artifactElidedBytes?: number;
+		artifactError?: OutputArtifactError;
+		totalLines: number;
+		totalBytes: number;
+		outputLines: number;
+		outputBytes: number;
+		displayOutputs: EvalDisplayOutput[];
+	},
+): ExecutorBackendResult {
 	return {
+		outputEncoding: result.outputEncoding,
+		outputReplacements: result.outputReplacements,
+		outputEncodings: result.outputEncodings,
+		outputEncodingUnknownReaders: result.outputEncodingUnknownReaders,
 		output: result.output,
 		exitCode: result.exitCode,
 		cancelled: result.cancelled,

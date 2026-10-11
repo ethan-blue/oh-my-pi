@@ -7,6 +7,7 @@ import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
+	OutputDecoder,
 	PtySession,
 	Shell,
 	type ShellFilesystem,
@@ -57,6 +58,14 @@ export interface BashExecutorOptions {
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
 	pty?: BashPtyOptions;
+	/**
+	 * Declared encoding of the captured output stream: `"gbk"` decodes the
+	 * whole stream as CP936, `"utf8"` decodes UTF-8 only (invalid bytes become
+	 * U+FFFD); absent keeps the automatic UTF-8-first decode with the Windows
+	 * ANSI code page as fallback. The result reports what was actually used
+	 * (`BashResult.outputEncoding`).
+	 */
+	outputEncoding?: "utf8" | "gbk";
 	/**
 	 * Refuse git commands that discard or move shared work (`bash.gitGuard`),
 	 * enforced by the embedded shell's `git` builtin.
@@ -115,6 +124,27 @@ export interface BashResult {
 	workingDir?: string;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
+	/**
+	 * The ONE encoding every settled output reader used: `"utf8"`, `"gbk"`
+	 * (explicit), or `"cp<N>"` for a Windows ANSI code page fallback. Undefined
+	 * when readers disagreed (see `outputEncodings`) or any finished without a
+	 * summary (see `outputEncodingUnknownReaders`).
+	 */
+	outputEncoding?: string;
+	/**
+	 * Distinct encodings among the settled output readers, first-seen order —
+	 * one entry per captured stream/chain segment, so mixed sources stay
+	 * visible. Undefined when nothing was observed.
+	 */
+	outputEncodings?: string[];
+	/**
+	 * Undecodable byte sequences substituted across all settled readers; the
+	 * UTF-8/GBK modes substitute U+FFFD, the Windows ACP mode the OS default
+	 * character. Undefined while any reader is unobserved.
+	 */
+	outputReplacements?: number;
+	/** Captured output readers that finished WITHOUT a decode summary. */
+	outputEncodingUnknownReaders?: number;
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the
@@ -462,6 +492,7 @@ function buildUserShellPtyEnv(
  * the sink keeps the sanitized capture for the transcript and the model.
  */
 async function executeUserShellPty(run: {
+	outputEncoding: "utf8" | "gbk" | undefined;
 	shell: string;
 	args: string[];
 	command: string;
@@ -478,6 +509,7 @@ async function executeUserShellPty(run: {
 	const result = await session.startArgv(
 		{
 			application: run.shell,
+			outputEncoding: run.outputEncoding,
 			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
 			cwd: run.cwd,
 			env: run.env,
@@ -497,6 +529,10 @@ async function executeUserShellPty(run: {
 	);
 	if (result.timedOut) {
 		return {
+			outputEncoding: result.outputEncoding,
+			outputReplacements: result.outputReplacements,
+			outputEncodings: result.outputEncodings,
+			outputEncodingUnknownReaders: result.outputEncodingUnknownReaders,
 			exitCode: undefined,
 			cancelled: true,
 			timedOut: true,
@@ -509,6 +545,10 @@ async function executeUserShellPty(run: {
 	}
 	if (result.cancelled) {
 		return {
+			outputEncoding: result.outputEncoding,
+			outputReplacements: result.outputReplacements,
+			outputEncodings: result.outputEncodings,
+			outputEncodingUnknownReaders: result.outputEncodingUnknownReaders,
 			exitCode: undefined,
 			cancelled: true,
 			...(await run.dump("Command cancelled")),
@@ -516,6 +556,10 @@ async function executeUserShellPty(run: {
 	}
 	return {
 		exitCode: result.exitCode,
+		outputEncoding: result.outputEncoding,
+		outputReplacements: result.outputReplacements,
+		outputEncodings: result.outputEncodings,
+		outputEncodingUnknownReaders: result.outputEncodingUnknownReaders,
 		cancelled: false,
 		...(await run.dump()),
 	};
@@ -529,6 +573,15 @@ export async function executeProtectedBuild(argv: string[], options: BashExecuto
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
+	// Protected builds decode through the same native OutputDecoder the
+	// embedded shell uses, instead of ptree's UTF-8-only TextDecoder — one
+	// decode policy per process, and the encoding actually used is reportable.
+	const decoders: OutputDecoder[] = [];
+	const decodeOutput = (): { push: (bytes: Uint8Array) => string; finish: () => string } => {
+		const decoder = new OutputDecoder(options.outputEncoding);
+		decoders.push(decoder);
+		return decoder;
+	};
 	try {
 		const result = await ptree.exec(argv, {
 			cwd: options.cwd,
@@ -538,12 +591,25 @@ export async function executeProtectedBuild(argv: string[], options: BashExecuto
 			allowAbort: true,
 			allowNonZero: true,
 			onOutput: chunk => sink.push(chunk),
+			outputDecoder: decodeOutput,
 		});
+		// Aggregate per-stream provenance the same way the native shell
+		// aggregates chain segments: a uniform encoding claim requires every
+		// stream to agree — a process's stdout and stderr may genuinely differ.
+		// Both ptree streams always drain to EOF, so no reader is unknown here.
+		const encodings = [...new Set(decoders.map(decoder => decoder.encoding))];
 		return {
 			...(await sink.dump()),
 			exitCode: result.exitCode ?? undefined,
 			cancelled: result.exitError?.aborted ?? false,
 			timedOut: result.exitError instanceof ptree.TimeoutError,
+			...(decoders.length > 0
+				? {
+						outputEncoding: encodings.length === 1 ? encodings[0] : undefined,
+						outputEncodings: encodings,
+						outputReplacements: decoders.reduce((total, decoder) => total + decoder.replacements, 0),
+					}
+				: {}),
 		};
 	} finally {
 		await sink.dispose();
@@ -659,6 +725,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		const requestedMs = options?.timeout;
 		try {
 			return await executeUserShellPty({
+				outputEncoding: options?.outputEncoding,
 				shell,
 				args,
 				command: preflight.command,
@@ -760,6 +827,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
+				outputEncoding: options?.outputEncoding,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -868,11 +936,16 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion
+		// Normal completion; decode provenance passes through as-is (undefined
+		// fields stay absent — unknown provenance must not become a claim).
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			outputEncoding: winner.result.outputEncoding ?? undefined,
+			outputEncodings: winner.result.outputEncodings ?? undefined,
+			outputReplacements: winner.result.outputReplacements ?? undefined,
+			outputEncodingUnknownReaders: winner.result.outputEncodingUnknownReaders ?? undefined,
 			...(await dump()),
 		};
 	} catch (err) {

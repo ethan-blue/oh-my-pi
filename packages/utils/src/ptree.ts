@@ -147,6 +147,28 @@ export class TimeoutError extends AbortError {
 
 // ── Wait / Exec types ────────────────────────────────────────────────────────
 
+/**
+ * Incremental bytes→text decoder for one captured child stream.
+ *
+ * One instance per stream: `push` each chunk as it arrives, `finish` at EOF.
+ * The default is a streaming UTF-8 `TextDecoder`; callers that captured from
+ * tools emitting another encoding (e.g. Windows ANSI/GBK build tools) inject
+ * their own decoder so every capture path shares one decode policy.
+ */
+export interface StreamDecoder {
+	push(bytes: Uint8Array): string;
+	finish(): string;
+}
+
+/** Default per-stream decoder: streaming UTF-8 `TextDecoder`. */
+function defaultStreamDecoder(): StreamDecoder {
+	const dec = new TextDecoder();
+	return {
+		push: bytes => dec.decode(bytes, { stream: true }),
+		finish: () => dec.decode(),
+	};
+}
+
 /** Options for waiting for process exit and capturing output. */
 export interface WaitOptions {
 	allowNonZero?: boolean;
@@ -200,6 +222,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
 	#windowsRootProcess?: Process;
+	#decoderFactory: () => StreamDecoder;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
@@ -207,13 +230,15 @@ export class ChildProcess<In extends InMask = InMask> {
 		terminateGroup = false,
 		hardKillTree = false,
 		private readonly onOutput?: (chunk: string) => void,
+		decoderFactory?: () => StreamDecoder,
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
 		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		this.#decoderFactory = decoderFactory ?? defaultStreamDecoder;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
-		const dec = new TextDecoder();
+		const dec = this.#decoderFactory();
 		const trim = () => {
 			if (this.#stderrTail.length > NonZeroExitError.MAX_TRACE)
 				this.#stderrTail = this.#stderrTail.slice(-NonZeroExitError.MAX_TRACE);
@@ -240,7 +265,7 @@ export class ChildProcess<In extends InMask = InMask> {
 					const r = await reader.read();
 					if (r.done) break;
 					this.#stderrChunks?.push(r.value);
-					const text = dec.decode(r.value, { stream: true });
+					const text = dec.push(r.value);
 					this.onOutput?.(text);
 					this.#stderrTail += text;
 					trim();
@@ -248,7 +273,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			} catch {}
 			this.#pipeReaders.delete(reader);
 			this.#openPipeReaders--;
-			const tail = dec.decode();
+			const tail = dec.finish();
 			this.onOutput?.(tail);
 			this.#stderrTail += tail;
 			trim();
@@ -441,7 +466,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		this.#pipeReaders.add(reader);
-		const dec = new TextDecoder();
+		const dec = this.#decoderFactory();
 		let out = "";
 		try {
 			for (;;) {
@@ -451,7 +476,7 @@ export class ChildProcess<In extends InMask = InMask> {
 				}
 				const r = await reader.read();
 				if (r.done) break;
-				const text = dec.decode(r.value, { stream: true });
+				const text = dec.push(r.value);
 				if (this.onOutput) this.onOutput(text);
 				else out += text;
 			}
@@ -460,7 +485,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		}
 		this.#pipeReaders.delete(reader);
 		this.#openPipeReaders--;
-		const tail = dec.decode();
+		const tail = dec.finish();
 		if (this.onOutput) {
 			this.onOutput(tail);
 			return "";
@@ -537,7 +562,10 @@ export class ChildProcess<In extends InMask = InMask> {
 		const stdoutP = this.#readStream(this.proc.stdout);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
-				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
+				? this.#stderrDone.then(() => {
+						const dec = this.#decoderFactory();
+						return dec.push(Buffer.concat(stderrChunks)) + dec.finish();
+					})
 				: this.#stderrDone.then(() => this.#stderrTail);
 
 		const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
@@ -634,6 +662,12 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	stderr?: "full" | null;
 	/** Stream decoded output without retaining stdout; stderr keeps its bounded error tail. */
 	onOutput?: (chunk: string) => void;
+	/**
+	 * Factory for the per-stream bytes→text decoder (stdout and stderr each
+	 * get one instance). Absent decodes as UTF-8 via `TextDecoder`; inject a
+	 * decoder to capture output in another encoding with one shared policy.
+	 */
+	outputDecoder?: () => StreamDecoder;
 };
 
 function spawnInternal<In extends InMask = InMask>(
@@ -641,7 +675,7 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, onOutput, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, onOutput, outputDecoder, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
 	const commandEnv = rest.env ?? Bun.env;
 	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
@@ -660,7 +694,15 @@ function spawnInternal<In extends InMask = InMask>(
 				}
 			: rest.env,
 	});
-	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper, onOutput);
+	const cp = new ChildProcess(
+		child,
+		stderr === "full",
+		retainFullStderr,
+		detached === true,
+		useSubreaper,
+		onOutput,
+		outputDecoder,
+	);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

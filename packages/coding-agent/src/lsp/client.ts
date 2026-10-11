@@ -655,15 +655,19 @@ async function reconcileExecutedChanges(
  * when the edit fails partway the already-executed prefix is still reconciled before the
  * error propagates so mutated files never keep stale overlays.
  */
+export type WorkspaceEditApplyOutcome = string[] & {
+	encodingNotes?: string[];
+};
+
 export async function applyWorkspaceEditWithLsp(
 	edit: WorkspaceEdit,
 	cwd: string,
 	signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<WorkspaceEditApplyOutcome> {
 	const executed: ExecutedWorkspaceChange[] = [];
-	let applied: string[];
+	let outcome: { applied: string[]; encodingNotes?: string[] };
 	try {
-		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change)));
+		outcome = await applyWorkspaceEdit(edit, cwd, change => executed.push(change));
 	} catch (err) {
 		// Best-effort: overlays for the mutated prefix must not stay stale, but
 		// reconciliation problems must not mask the original apply failure.
@@ -677,6 +681,9 @@ export async function applyWorkspaceEditWithLsp(
 		throw err;
 	}
 	await reconcileExecutedChanges(executed, cwd, signal);
+	const applied: WorkspaceEditApplyOutcome = Object.assign([...outcome.applied], {
+		encodingNotes: outcome.encodingNotes,
+	});
 	return applied;
 }
 

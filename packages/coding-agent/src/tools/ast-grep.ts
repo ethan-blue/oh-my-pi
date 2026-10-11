@@ -3,7 +3,12 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-natives";
-import { discoverEncodingPolicy } from "../encoding/index";
+import {
+	type AstEncodingDiagnostics,
+	discoverEncodingPolicy,
+	formatAstEncodingNotes,
+	mergeAstDiagnosticEvidence,
+} from "../encoding/index";
 
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
@@ -80,19 +85,26 @@ async function runMultiTargetAstGrep(
 		filesystem: ShellFilesystem;
 		encodingPolicy?: { root: string; json: string };
 	},
-): Promise<{
-	matches: AstFindMatch[];
-	totalMatches: number;
-	filesWithMatches: number;
-	filesSearched: number;
-	limitReached: boolean;
-	parseErrors?: string[];
-	missingGrammars?: string[];
-}> {
+): Promise<
+	AstEncodingDiagnostics & {
+		matches: AstFindMatch[];
+		totalMatches: number;
+		filesWithMatches: number;
+		filesSearched: number;
+		limitReached: boolean;
+		parseErrors?: string[];
+		missingGrammars?: string[];
+		ambiguousEncodingFiles?: string[];
+		ambiguousEncodingFilesTruncated?: boolean;
+	}
+> {
 	const retainedMatches: AstFindMatch[] = [];
 	const retainedCapacity = options.skip + options.limit + 1;
 	const parseErrors: string[] = [];
 	const missingGrammars = new Set<string>();
+	const encodingEvidence: AstEncodingDiagnostics = {};
+	const ambiguousEncodingFiles: string[] = [];
+	let ambiguousEncodingFilesTruncated = false;
 	let totalMatches = 0;
 	let filesWithMatches = 0;
 	let filesSearched = 0;
@@ -115,7 +127,24 @@ async function runMultiTargetAstGrep(
 		filesSearched += targetResult.filesSearched;
 		limitReached = limitReached || targetResult.limitReached;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
+		mergeAstDiagnosticEvidence(encodingEvidence, targetResult, file =>
+			relativeSearchResultPath(options.commonBasePath, resolveSearchResultPath(target.basePath, file)),
+		);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
+		if (targetResult.ambiguousEncodingFilesTruncated) {
+			ambiguousEncodingFilesTruncated = true;
+		}
+		for (const file of targetResult.ambiguousEncodingFiles ?? []) {
+			const absolute = resolveSearchResultPath(target.basePath, file);
+			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
+			if (ambiguousEncodingFiles.includes(rebased)) {
+				// already present
+			} else if (ambiguousEncodingFiles.length < 10) {
+				ambiguousEncodingFiles.push(rebased);
+			} else {
+				ambiguousEncodingFilesTruncated = true;
+			}
+		}
 		for (const match of targetResult.matches) {
 			const absolute = resolveSearchResultPath(target.basePath, match.path);
 			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
@@ -133,6 +162,9 @@ async function runMultiTargetAstGrep(
 		limitReached: limitReached || visible.length > options.limit,
 		parseErrors: parseErrors.length > 0 ? parseErrors : undefined,
 		missingGrammars: missingGrammars.size > 0 ? [...missingGrammars] : undefined,
+		ambiguousEncodingFiles: ambiguousEncodingFiles.length > 0 ? ambiguousEncodingFiles : undefined,
+		ambiguousEncodingFilesTruncated: ambiguousEncodingFilesTruncated ? true : undefined,
+		...encodingEvidence,
 	};
 }
 
@@ -262,7 +294,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						}),
 			);
 			const grammarNote = result.missingGrammars?.length ? missingGrammarsNote(result.missingGrammars) : undefined;
-
+			const encodingAmbiguityNote = formatAstEncodingNotes(result);
 			const normalizedParseErrors = (result.parseErrors ?? []).map(error => {
 				const parseError = error.match(/^.+: (.+: parse error \(syntax tree contains error nodes\))$/);
 				return parseError?.[1] ?? error;
@@ -304,9 +336,13 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
+				const ambiguityMessage = encodingAmbiguityNote ? `\n\n[${encodingAmbiguityNote}]` : "";
 				// Zero matches is useless even with parse issues: the follow-up
 				// call has already corrected course by the time compaction runs.
-				return toolResult(baseDetails).text(`${noMatchMessage}${parseMessage}${grammarMessage}`).useless().done();
+				return toolResult(baseDetails)
+					.text(`${noMatchMessage}${parseMessage}${grammarMessage}${ambiguityMessage}`)
+					.useless()
+					.done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
@@ -390,7 +426,9 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			if (grammarNote) {
 				outputLines.push("", grammarNote);
 			}
-
+			if (encodingAmbiguityNote) {
+				outputLines.push("", `[${encodingAmbiguityNote}]`);
+			}
 			return toolResult(details).text(outputLines.join("\n")).done();
 		});
 	}

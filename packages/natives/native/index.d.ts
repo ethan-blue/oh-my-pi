@@ -219,6 +219,14 @@ export declare class EncodingPolicy {
    * applies the new-file rule.
    */
   resolve(path: string, exists: boolean): string | null
+  /**
+   * [`Self::resolve`] plus what selected the encoding: `null` when the
+   * policy does not manage the path, else `{ encoding, fromOverride }`.
+   * `fromOverride=true` means an explicit override entry matched (the
+   * user's per-path answer); `false` means the include scope's
+   * default/new-file rule did.
+   */
+  resolveDetailed(path: string, exists: boolean): EncodingResolution | null
   /** Absolute policy root the globs are relative to. */
   get root(): string
 }
@@ -314,6 +322,38 @@ export declare class NativeOAuthCallback {
   waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
   /** Restore prior OS state and release ownership. Safe to call repeatedly. */
   dispose(): Promise<undefined>
+}
+
+/**
+ * Incremental decoder for one captured child-process output stream.
+ *
+ * The same decoder the embedded shell's pipe readers use, exposed so
+ * TypeScript capture paths (e.g. the protected-build process tree) share one
+ * decode policy instead of running a parallel UTF-8-only one. One instance
+ * per stream; `push` each chunk as it arrives, `finish` at EOF, then read
+ * `encoding`/`replacements` to annotate the captured result.
+ */
+export declare class OutputDecoder {
+  /**
+   * Create a decoder. `encoding` `"utf8"` decodes UTF-8 only (invalid bytes
+   * become U+FFFD), `"gbk"` decodes the whole stream as CP936; when absent,
+   * UTF-8 is tried first with the Windows ANSI code page as fallback.
+   */
+  constructor(encoding?: string | undefined | null)
+  /**
+   * Push the next chunk of captured bytes; returns the text that is safe to
+   * emit now (incomplete multi-byte sequences stay buffered).
+   */
+  push(bytes: Uint8Array): string
+  /** Flush held bytes at end of stream. */
+  finish(): string
+  /**
+   * Encoding actually used so far: `"utf8"`, `"gbk"`, or `"cp<N>"` for a
+   * Windows ANSI code page fallback.
+   */
+  get encoding(): string
+  /** Undecodable byte sequences replaced with U+FFFD so far. */
+  get replacements(): number
 }
 
 /**
@@ -899,11 +939,14 @@ export interface AstFindResult {
   limitReached: boolean
   /** Non-fatal parse or pattern errors collected during the run. */
   parseErrors?: Array<string>
-  /**
-   * Languages whose on-demand grammar is not installed; their files were
-   * skipped (see `wasmGrammarFor`).
-   */
+  /** Languages whose on-demand grammar is not installed; their files were */
   missingGrammars?: Array<string>
+  /** Files decoded as GBK whose bytes are also strictly valid UTF-8. */
+  ambiguousEncodingFiles?: Array<string>
+  /** True when additional ambiguous files were detected beyond the cap. */
+  ambiguousEncodingFilesTruncated?: boolean
+  encodingDiagnostics?: Array<SourceEncodingDiagnostic>
+  encodingDiagnosticsTruncated?: boolean
 }
 
 /**
@@ -1081,11 +1124,14 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
-  /**
-   * Languages whose on-demand grammar is not installed; their files were
-   * skipped (see `wasmGrammarFor`).
-   */
+  /** Languages whose on-demand grammar is not installed; their files were */
   missingGrammars?: Array<string>
+  /** Files decoded as GBK whose bytes are also strictly valid UTF-8. */
+  ambiguousEncodingFiles?: Array<string>
+  /** True when additional ambiguous files were detected beyond the cap. */
+  ambiguousEncodingFilesTruncated?: boolean
+  encodingDiagnostics?: Array<SourceEncodingDiagnostic>
+  encodingDiagnosticsTruncated?: boolean
 }
 
 export interface AxNode {
@@ -1784,6 +1830,23 @@ export interface EncodingPolicyOptions {
   json: string
 }
 
+/** Policy answer for one path, with the origin that selected it. */
+export interface EncodingResolution {
+  /** `"utf8"` or `"gbk"`. */
+  encoding: string
+  /** `true` when an explicit override entry matched. */
+  fromOverride: boolean
+}
+
+/**
+ * Whether BOM-free, non-ASCII `bytes` are also strictly valid UTF-8.
+ *
+ * The byte-level condition behind the GBK/UTF-8 ambiguity diagnostic; byte
+ * validity only, never decoded-content inspection or character-frequency
+ * guessing.
+ */
+export declare function encodingUtf8AmbiguousWithGbk(bytes: Uint8Array): boolean
+
 /** Reject Python coding declarations incompatible with the write encoding. */
 export declare function encodingValidateSource(path: string, text: string, encoding: string): void
 
@@ -2108,6 +2171,15 @@ export interface GrepResult {
   limitReached?: boolean
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
+  /**
+   * Up to [`AMBIGUOUS_ENCODING_FILES_CAP`] files the encoding policy decoded
+   * as GBK through an include rule (not an explicit override) whose
+   * BOM-free, non-ASCII searched bytes are also strictly valid UTF-8. Both
+   * encodings read them as different text; an explicit `.omp/encoding.json`
+   * override resolves which one is right. The search still follows the
+   * policy — this is a diagnostic, never an encoding switch.
+   */
+  ambiguousEncodingFiles?: Array<string>
 }
 
 /**
@@ -2779,6 +2851,8 @@ export interface ProcessWaitOptions {
 
 /** Options for running an executable and argument vector in a PTY session. */
 export interface PtyArgvStartOptions {
+  /** Declared output encoding; absent uses the shared automatic policy. */
+  outputEncoding?: string
   /** Executable name or path. */
   application: string
   /** Arguments passed directly to the executable. */
@@ -2805,10 +2879,16 @@ export interface PtyRunResult {
   cancelled: boolean
   /** Whether command timed out. */
   timedOut: boolean
+  outputEncoding?: string
+  outputReplacements?: number
+  outputEncodings?: Array<string>
+  outputEncodingUnknownReaders?: number
 }
 
 /** Options for running a command in a PTY session. */
 export interface PtyStartOptions {
+  /** Declared output encoding; absent uses the shared automatic policy. */
+  outputEncoding?: string
   /** Command string to execute. */
   command: string
   /** Working directory for command execution. */
@@ -2976,6 +3056,11 @@ export interface ShellExecuteOptions {
   signal?: unknown
   /** Filesystem backing the command (native when absent). */
   filesystem?: ShellFilesystem
+  /**
+   * Declared encoding of the captured output stream; see
+   * [`ShellRunOptions::output_encoding`].
+   */
+  outputEncoding?: string
 }
 
 /** Host filesystem injected into shell sessions. */
@@ -3324,6 +3409,13 @@ export interface ShellRunOptions {
    * filesystem applies again to later runs.
    */
   filesystem?: ShellFilesystem
+  /**
+   * Declared encoding of the captured output stream: `"utf8"` (UTF-8 only,
+   * invalid bytes become U+FFFD), `"gbk"` (the whole stream as CP936), or
+   * absent for the automatic UTF-8-first decode with the Windows ANSI code
+   * page as fallback. The run result reports what was actually used.
+   */
+  outputEncoding?: string
 }
 
 /** Result of running a shell command. */
@@ -3336,13 +3428,39 @@ export interface ShellRunResult {
   timedOut: boolean
   /**
    * When the minimizer rewrote the captured output, this carries the
-   * original buffer + telemetry so the session layer can persist it as
-   * an artifact and splice an `artifact://<id>` reference into the
+   * original buffer + telemetry so the session layer can persist it as an
+   * artifact and splice an `artifact://<id>` reference into the
    * minimized text shown to the agent. `None` when nothing was rewritten.
    */
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * Encoding the command's captured output was decoded with: `"utf8"`,
+   * `"gbk"` (explicit), or `"cp<N>"` for a Windows ANSI code page fallback
+   * (e.g. `"cp936"` on a Simplified Chinese system). `null` when the
+   * readers disagreed (see `outputEncodings`) or any finished without a
+   * summary (see `outputEncodingUnknownReaders`).
+   */
+  outputEncoding?: string
+  /**
+   * Distinct encodings among the settled output readers, first-seen order —
+   * one entry per captured stream/chain segment, so mixed sources stay
+   * visible. `null` when nothing was observed.
+   */
+  outputEncodings?: Array<string>
+  /**
+   * Undecodable byte sequences substituted across all settled readers
+   * (U+FFFD in the UTF-8/GBK modes, the Windows default character in the
+   * ACP mode); `null` while any reader is unobserved.
+   */
+  outputReplacements?: number
+  /**
+   * Captured output readers that finished WITHOUT a decode summary (killed
+   * at shutdown, pipe registration failure). `null` when every reader
+   * settled.
+   */
+  outputEncodingUnknownReaders?: number
 }
 
 /**
@@ -3417,6 +3535,15 @@ export interface SnapcompactRenderOptions {
  * considered renderable because they are interpreted outside font lookup.
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
+
+export interface SourceEncodingDiagnostic {
+  path: string
+  kind: string
+  scope: string
+  checkedByteLength: number
+  complete: boolean
+  reason?: string
+}
 
 /** A misspelled span measured in JavaScript/UTF-16 code units. */
 export interface SpellingRange {

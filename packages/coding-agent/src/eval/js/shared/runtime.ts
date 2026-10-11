@@ -30,6 +30,8 @@ export interface RuntimeCallIdentity {
  * overlapping async cells can route output/tool calls back to their own run.
  */
 export interface RuntimeHooks {
+	/** Raw stdio writes are decoded in the host; the shared runtime stays addon-free. */
+	onBytes?(stream: "stdout" | "stderr", bytes: Uint8Array): void;
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
 	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
@@ -905,7 +907,11 @@ function patchStdioOnce(): void {
 			if (!hooks) return original(chunk, encoding, callback);
 			const cb = typeof encoding === "function" ? encoding : callback;
 			const enc = typeof encoding === "string" ? (encoding as BufferEncoding) : undefined;
-			hooks.onText(chunkToString(chunk, enc));
+			if (chunk instanceof Uint8Array && hooks.onBytes && (enc === undefined || enc === "utf8" || enc === "utf-8")) {
+				hooks.onBytes(stream === process.stdout ? "stdout" : "stderr", chunk);
+			} else {
+				hooks.onText(chunkToString(chunk, enc));
+			}
 			if (typeof cb === "function") (cb as (error?: Error | null) => void)();
 			return true;
 		};

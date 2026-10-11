@@ -1,3 +1,4 @@
+import { formatOutputEncodingNotice } from "../eval/output-decode";
 import {
 	type BashToolDetails,
 	formatBackgroundNotice,
@@ -327,11 +328,17 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
 
+const BASH_OUTPUT_ENCODING_DESCRIPTION =
+	"declared encoding of the command's output: 'gbk' when the tool writes GBK/CP936 bytes (Windows CJK build tools), 'utf8' to force UTF-8-only decoding; omit for automatic UTF-8-first decoding. The result notes which encoding was actually used.";
+
+// Formatting is shared with eval so unknown/mixed/loss semantics stay identical.
+
 const bashSchemaBase = type({
 	command: type("string"),
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"outputEncoding?": type("'utf8' | 'gbk'").describe(BASH_OUTPUT_ENCODING_DESCRIPTION),
 });
 
 const bashSchemaWithAsync = type({
@@ -339,6 +346,7 @@ const bashSchemaWithAsync = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"outputEncoding?": type("'utf8' | 'gbk'").describe(BASH_OUTPUT_ENCODING_DESCRIPTION),
 	"async?": "boolean",
 });
 
@@ -347,6 +355,7 @@ const bashSchemaWithService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"outputEncoding?": type("'utf8' | 'gbk'").describe(BASH_OUTPUT_ENCODING_DESCRIPTION),
 	"name?": "string <= 48",
 	"ready?": type({
 		"log?": "string",
@@ -361,6 +370,7 @@ const bashSchemaWithAsyncAndService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"outputEncoding?": type("'utf8' | 'gbk'").describe(BASH_OUTPUT_ENCODING_DESCRIPTION),
 	"async?": "boolean",
 	"name?": "string <= 48",
 	"ready?": type({
@@ -385,6 +395,8 @@ export interface BashToolInput {
 	ready?: ServiceReady;
 	async?: boolean;
 	pty?: boolean;
+	/** Declared output encoding; see the bash tool's `outputEncoding` parameter. */
+	outputEncoding?: "utf8" | "gbk";
 }
 
 /**
@@ -698,6 +710,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const outputLines = [this.#formatResultOutput(result)];
 		const notices: string[] = [];
+		const encodingNotice = formatOutputEncodingNotice(
+			result.outputEncoding,
+			result.outputEncodings,
+			result.outputReplacements,
+			result.outputEncodingUnknownReaders,
+		);
+		if (encodingNotice) notices.push(encodingNotice);
 		if (options.wallTimeMs !== undefined) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
 		}
@@ -822,6 +841,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		requestedTimeoutSec?: number;
 		notices?: readonly string[];
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
+		/** Declared output encoding; see the bash tool's `outputEncoding` parameter. */
+		outputEncoding?: "utf8" | "gbk";
 		/** A foreground wait races the job: updates stream to the caller and the row stays hidden until promoted. */
 		foreground: boolean;
 		/** Approval tier bounding the job's URL filesystem. */
@@ -858,6 +879,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						filesystem: this.#urlFilesystem(runSignal, options.approvalTier).shellFilesystem(),
 						artifactPath,
 						artifactId,
+						outputEncoding: options.outputEncoding,
 						onPreview: text => {
 							latestText = text;
 							void reportProgress(text, {
@@ -947,6 +969,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			ready: rawReady,
 			async: rawAsync,
 			pty,
+			outputEncoding,
 		}: BashToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
@@ -1119,6 +1142,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				cwd: commandCwd,
 				signal,
 				timeout: timeoutMs,
+				outputEncoding,
 			});
 			return this.#buildCompletedResult(result, timeoutSec, { notices: pendingNotices });
 		}
@@ -1134,6 +1158,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				onUpdate,
+				outputEncoding,
 				foreground: false,
 				approvalTier,
 			});
@@ -1174,6 +1199,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				onUpdate,
+				outputEncoding,
 				foreground: !startBackgrounded,
 				approvalTier,
 			});
@@ -1528,6 +1554,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// command + direnv env (backendPreflight is defined whenever this
 					// branch runs, since both gate on canUseInteractiveBashPty).
 					command: backendPreflight?.command ?? command,
+					outputEncoding,
 					cwd: commandCwd,
 					timeoutMs,
 					signal,
@@ -1546,6 +1573,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					filesystem: this.#urlFilesystem(signal, approvalTier).shellFilesystem(),
 					artifactPath,
 					artifactId,
+					outputEncoding,
 					// Stream the sink's own inline view rather than re-buffering chunks.
 					onPreview: onUpdate ? text => onUpdate({ content: [{ type: "text", text }], details: {} }) : undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),

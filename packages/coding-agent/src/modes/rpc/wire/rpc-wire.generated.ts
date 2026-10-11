@@ -530,6 +530,14 @@ export interface BashResult {
 	artifactElidedBytes?: number;
 	artifactError?: Record<string, unknown>;
 	workingDir?: string;
+	/** The ONE encoding every settled output reader used (`utf8`, `gbk`, or `cp<N>`); null when readers disagreed (see outputEncodings) or any finished without a summary (see outputEncodingUnknownReaders). */
+	outputEncoding?: string;
+	/** Distinct encodings among the settled output readers, first-seen order (one per captured stream/chain segment); null when nothing was observed. */
+	outputEncodings?: string[];
+	/** Undecodable byte sequences substituted across all settled readers (U+FFFD in the UTF-8/GBK modes, the Windows default character in the ACP mode); null while any reader is unobserved. */
+	outputReplacements?: number;
+	/** Captured output readers that finished WITHOUT a decode summary; null when every reader settled. */
+	outputEncodingUnknownReaders?: number;
 	images?: ImageContent[];
 }
 
