@@ -2,7 +2,7 @@
 
 文档日期：2026-10-08。工作目录：`D:\Projects\GitProjects\oh-my-pi`。
 
-> 2026-10-11 最新入口：[30 — v18.9.0-gbk.1 整合与发布](30-release-18.9.0-gbk.1.md)。用户授权后 #3 已关闭，保存前轮全部修复并合并最新官方正式版 v18.9.0。十五文件 154 passed / 3 skipped / 0 failed，Rust 3061 passed / 4 skipped，bun check 退出 0；独立 EXE 候选和真实升级回退通过。更新器 7 个 symlink 用例仍为 EPERM 环境阻塞，Unix / 真实模型 / E630 未验证。正式发布状态及下载证明见 30 号；下方初始快照与旧阶段 OPEN / 未提交状态是历史记录。
+> 2026-10-11 最新入口：[30 — v18.9.0-gbk.1 整合与发布](30-release-18.9.0-gbk.1.md)。用户授权后 #3 已关闭，保存前轮全部修复并合并最新官方正式版 v18.9.0。十五文件 154 passed / 3 skipped / 0 failed，Rust 3061 passed / 4 skipped，bun check 退出 0；独立 EXE、真实升级回退、GitHub 下载摘要 / smoke、公开 URL 下载安装均通过。新版已公开为预发布，release tag `288e14199e`，旧资产保留。更新器 7 个 symlink 用例仍为 EPERM 环境阻塞，Unix / 真实模型 / E630 未验证。完整证明见 30 号；下方初始快照与旧阶段 OPEN / 未提交状态是历史记录。
 
 > 2026-10-09 修复补充：下文初始状态是历史快照；已有实现与预发布，验收仍有缺口。用户报告的原生工具失败后改用 Python 写入事故已纳入 [R10 修复计划](11-native-tools-incident-plan.md)，与 R01—R09 同批修复。P09 重新打开，不沿用历史“通过”作为现状。
 

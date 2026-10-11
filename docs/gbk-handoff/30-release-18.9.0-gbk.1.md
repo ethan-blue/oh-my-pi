@@ -51,7 +51,7 @@
 
 空白检查：fork 未暂存差异 `git diff --check` 通过；合并暂存差异仅有上游新增 SCSS.sublime-syntax 的 EOF 空行提示，保留上游文件。用 `git -c core.whitespace=-blank-at-eof diff --cached --check` 确认其余空白检查通过，不宣称未调整选项的完整暂存检查零提示。
 
-发布资产将从干净、确切提交重新构建；最终发布 SHA、下载校验与公开结果在发布后追加，不用候选产物冒充提交后成品。
+发布资产已从干净、确切提交重新构建；最终发布 SHA、下载校验与公开结果见第 5 节，不用候选产物冒充提交后成品。
 
 首次提交后成品重建、CI=1 全仓 check、smoke 与真实安装回退均成功。首次打包因 Bun 子进程加载 Archive 脚本模块受 execution policy 限制失败；直接 shell 的模块加载成功不代表 Bun child 相同。打包器复用 Compress-Archive，沿安装器做法仅给新 PowerShell 子进程加 `-ExecutionPolicy Bypass`，使用 LiteralPath 与正确的单引号转义，不改系统 policy。保留失败 staging 后从新提交重建，避免重用旧 build-info 或覆盖失败产物。
 
@@ -62,3 +62,34 @@
 - Python kernel fd-1 无可靠单请求归属，JS 持久 writer 无请求 EOF 证据时保持 unknown；用户内部错误 decode 的字符串不可逆。
 - Unix 实机、无 AVX2 CPU、真实模型 / E630 / Keil、NumPy / matplotlib 缺依赖分支与性能 A/B 不冒称已验证。
 - 新包使用独立标签和资产，不覆盖 `v18.8.7-gbk.1`，安装器保留旧版本目录；原版 omp 与用户安装不被本轮验证替换。
+
+## 5. 正式分发结果与回读
+
+GitHub 于 `2026-10-11T10:34:16Z` 公开为 Windows x64 AVX2 预发布；读回 `isDraft=false`、`isPrerelease=true`，四项资产均 uploaded。未标成稳定 Latest，也未覆盖旧版资产。
+
+- Release：[v18.9.0-gbk.1](https://github.com/ethan-blue/oh-my-pi/releases/tag/v18.9.0-gbk.1)。
+- ZIP：[ompg-18.9.0-gbk.1-windows-x64.zip](https://github.com/ethan-blue/oh-my-pi/releases/download/v18.9.0-gbk.1/ompg-18.9.0-gbk.1-windows-x64.zip)，111465346 bytes。
+- 发布源码 / tag 解引用 SHA：`288e14199e5f23433ef8280d5ff1e9e0ad07e6be`；包含合并提交 `c9e6dbb5526ab789231d7e0915a0fa1f96cd3ec5`，前轮完整修复和上游 v18.9.0 均为祖先。
+- ZIP SHA256：`34cf42711fe641f5ae63e03a50f0c62ae10e3f0feecc6592aabd79bcd0566cd5`。
+- EXE SHA256：`84176201c91343a7faf4ebe8a15660f61385d34cedc67a1c01aa69428660be71`。
+- native SHA256：`f05f765e6c605f3d5e4aefc571df0f0e1c80340fe598d3bb7f3b42200ea5080b`。
+
+上传后下载到新的 `release-staging/18.9.0-gbk.1-download-verify`。GitHub 四资产 digest 与本地一致；下载的外层三条资产清单与内层七条文件清单全部通过。build-info 的版本、源码 SHA、上游版本、native SHA 均严格核对；下载 EXE 输出 `ompg/18.9.0-gbk.1` 和 `smoke-test: ok`。
+
+公开后另用下载的 installer 在全新 TEMP 安装目录执行 `-Download -Version 18.9.0-gbk.1 -NoPath`，实际从公开 URL 获取 ZIP / sums，校验、展开、安装成功；安装后的 EXE 版本与 SHA256 一致，用户 PATH 不变，最后保守卸载探针。日志 `%TEMP%/ompg-18.9-public-install.log`。这是公开分发路径证明，不是仅运行本地构建。
+
+最终提交后的源码构建、`CI=1 bun check`、smoke、18.8.7 → 18.9.0 → 18.8.7 隔离安装回退及打包均退出 0。日志为 `cli-release` / `check-release` / `smoke-release` / `installer-release` / `package`。源码功能分支和 integration 分支已推送，release tag 读回一致；发布后仅追加文档，不移动 tag 或重传资产。
+
+最后核查官方最新正式 Release 仍为 v18.9.0；#3 仍 CLOSED。旧 v18.8.7-gbk.1 仍公开并保留原资产。
+
+## 6. 用户升级与后续维护
+
+退出正在运行的 ompg，完整解压新版 ZIP，在解压目录执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
+```
+
+自定义安装目录时沿用原 `-InstallDir`。新开终端 `ompg --version` 应为 `ompg/18.9.0-gbk.1`。回退使用本版脚本 `-Download -Version 18.8.7-gbk.1`，同样沿用安装目录；不要用 `ompg update` 切换官方版。
+
+后续 AI 从 release tag 对照源码，先读取本记录与 02 协议、28/29 修复证明。保存当前工作后，只合并最新官方正式 release 标签；重点复查 TextFileIO / bounded prefix、legacy mutation queue、Python _CONTROL_IN、native loader、fork 身份 / 更新阻断等调用入口。复用既有 native codec、生成器、安装器与打包器；不使用 Python / shell 改写源码绕过文件编辑工具。门禁区分通过、跳过与环境阻塞，使用新的 GBK 版本标签，干净提交重建、草稿上传、下载校验后公开，保留旧版和原版 omp。
