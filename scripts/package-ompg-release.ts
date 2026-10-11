@@ -13,7 +13,7 @@
  *                                      THIRD-PARTY-NOTICES.txt
  *   SHA256SUMS.txt                   — hashes of every published asset (not itself)
  *
- * Usage: bun scripts/package-ompg-release.ts [--version 18.8.7-gbk.1] [--sha <git-sha>]
+ * Usage: bun scripts/package-ompg-release.ts [--version 18.9.0-gbk.1] [--sha <git-sha>]
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -107,9 +107,11 @@ await fs.writeFile(path.join(archiveDir, "SHA256SUMS.txt"), payloadSums.join("\n
 const zipPath = path.join(staging, `ompg-${version}-windows-x64.zip`);
 if (process.platform === "win32") {
 	const winArchive = archiveDir.replace(/\//g, "\\");
-	await $`powershell -NoProfile -Command Compress-Archive -Path '${winArchive}' -DestinationPath '${zipPath.replace(/\//g, "\\")}' -Force`.cwd(
-		root,
-	);
+	const winZip = zipPath.replace(/\//g, "\\");
+	const archiveCommand = `Compress-Archive -LiteralPath '${winArchive.replace(/'/g, "''")}' -DestinationPath '${winZip.replace(/'/g, "''")}'`;
+	// Archive is a script module. Scope the policy to this child process, as
+	// the installer does, without changing the user's execution-policy settings.
+	await $`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ${archiveCommand}`.cwd(root);
 } else {
 	await $`cd ${archiveDir} && zip -r ${zipPath} .`.cwd(root);
 }

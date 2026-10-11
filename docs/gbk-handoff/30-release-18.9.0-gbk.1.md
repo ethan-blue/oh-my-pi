@@ -53,6 +53,8 @@
 
 发布资产将从干净、确切提交重新构建；最终发布 SHA、下载校验与公开结果在发布后追加，不用候选产物冒充提交后成品。
 
+首次提交后成品重建、CI=1 全仓 check、smoke 与真实安装回退均成功。首次打包因 Bun 子进程加载 Archive 脚本模块受 execution policy 限制失败；直接 shell 的模块加载成功不代表 Bun child 相同。打包器复用 Compress-Archive，沿安装器做法仅给新 PowerShell 子进程加 `-ExecutionPolicy Bypass`，使用 LiteralPath 与正确的单引号转义，不改系统 policy。保留失败 staging 后从新提交重建，避免重用旧 build-info 或覆盖失败产物。
+
 ## 4. 持续边界
 
 - #3 为已解决的源码缺陷；如有新反例，由新 issue 继续跟踪。
