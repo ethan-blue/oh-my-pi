@@ -23,6 +23,7 @@ import { AstEditTool } from "@oh-my-pi/pi-coding-agent/tools/ast-edit";
 import { dispatchResolutionDevice } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import { applyWorkspaceEdit, writeTextWithPolicy } from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -316,6 +317,37 @@ describe("Issue #4: config discovery and text encoding regression", () => {
 	});
 
 	describe("G2: Config directory priority and fail-closed", () => {
+		it("LSP shared config loading prefers .ompg while retaining legacy .omp", async () => {
+			await Bun.write(
+				path.join(tempRoot, ".omp", "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"ompg-regression": {
+							command: process.execPath,
+							fileTypes: [".c"],
+							rootMarkers: ["."],
+							disabled: true,
+						},
+					},
+				}),
+			);
+			expect(loadConfig(tempRoot).servers["ompg-regression"]).toBeUndefined();
+			await Bun.write(
+				path.join(tempRoot, ".ompg", "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"ompg-regression": {
+							command: process.execPath,
+							fileTypes: [".c"],
+							rootMarkers: ["."],
+							disabled: false,
+						},
+					},
+				}),
+			);
+			expect(loadConfig(tempRoot).servers["ompg-regression"]?.command).toBe(process.execPath);
+		});
+
 		it("rejects a non-directory preferred namespace instead of using the legacy alias", async () => {
 			await Bun.write(path.join(tempRoot, ".ompg"), "not a directory");
 			await Bun.write(path.join(tempRoot, ".omp", "encoding.json"), POLICY_GBK);

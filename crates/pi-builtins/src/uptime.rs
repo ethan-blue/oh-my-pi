@@ -4,11 +4,13 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	io::{self, Write},
+	io::Write,
 	path::Path,
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
+#[cfg(unix)]
+use std::io;
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use jiff::{Timestamp, tz::TimeZone};
 

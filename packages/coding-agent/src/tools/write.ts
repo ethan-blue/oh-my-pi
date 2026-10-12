@@ -2,7 +2,6 @@ import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
 import { Database } from "bun:sqlite";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
-import * as nodePath from "node:path";
 import * as path from "node:path";
 import { assertProtectedConfigMutation } from "./protected-mode";
 

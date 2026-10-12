@@ -1974,16 +1974,19 @@ mod tests {
 
 	/// A pipe-like stdin delivering one queued chunk per `read`.
 	#[derive(Clone)]
-	struct Chunked(Arc<Mutex<VecDeque<Vec<u8>>>>);
+	struct Chunked(Arc<Mutex<VecDeque<Vec<u8>>>>, bool);
 
 	impl Chunked {
 		fn new(chunks: &[&[u8]]) -> Box<Self> {
-			Box::new(Self(Arc::new(Mutex::new(chunks.iter().map(|chunk| chunk.to_vec()).collect()))))
+			Box::new(Self(Arc::new(Mutex::new(chunks.iter().map(|chunk| chunk.to_vec()).collect())), false))
 		}
 	}
 
 	impl Read for Chunked {
 		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			if self.1 {
+				return Err(io::Error::other("injected read failure"));
+			}
 			let mut chunks = self.0.lock().unwrap();
 			let Some(chunk) = chunks.front_mut() else {
 				return Ok(0);
@@ -2369,9 +2372,10 @@ mod tests {
 	#[test]
 	fn read_errors_report_and_fail() {
 		let (_dir, root) = tempdir();
-		let outcome = run(&["if=."], b"", &root);
+		let outcome = run_with(&[], Box::new(Chunked(Arc::new(Mutex::new(VecDeque::new())), true)), &root);
 		assert_eq!(outcome.code, 1);
-		assert!(outcome.err.starts_with("dd: error reading '.': "), "{}", outcome.err);
+		assert!(outcome.err.starts_with("dd: error reading 'standard input': injected read failure\n"), "{}", outcome.err);
+		assert!(outcome.out.is_empty());
 		assert!(outcome.stats().ends_with("0+0 records in\n0+0 records out\n0 bytes copied, T, R\n"));
 	}
 

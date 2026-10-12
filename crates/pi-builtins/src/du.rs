@@ -616,7 +616,10 @@ impl Walker<'_> {
 	/// local mount point (a bind mount, which GNU does not warn about).
 	fn mount_point_in_cycle(&mut self, id: FileId, cycle: usize) -> bool {
 		if self.mounts.is_none() {
+			#[cfg(unix)]
 			let mut mounts = HashSet::new();
+			#[cfg(not(unix))]
+			let mounts = HashSet::new();
 			#[cfg(unix)]
 			if let Ok(list) = uucore::fsext::read_fs_list() {
 				for mount in list.into_iter().filter(|mount| !mount.remote && !mount.dummy) {
@@ -1121,9 +1124,9 @@ mod tests {
 		let (_, out, _) = du(&root, &["--inodes", "-s", "d"]);
 		assert_eq!(out, "3\td\n");
 		let (_, out, _) = du(&root, &["--inodes", "-s", "a", "d"]);
-		assert_eq!(out, "8\ta\n2\td\n");
+		assert_eq!(out, if cfg!(unix) { "8\ta\n2\td\n" } else { "7\ta\n2\td\n" });
 		let (_, out, _) = du(&root, &["--inodes", "-s", "-l", "a", "d"]);
-		assert_eq!(out, "8\ta\n3\td\n");
+		assert_eq!(out, if cfg!(unix) { "8\ta\n3\td\n" } else { "7\ta\n3\td\n" });
 	}
 
 	#[test]
@@ -1140,7 +1143,7 @@ mod tests {
 		let (_dir, root) = tree();
 		// 5 + 6 (symlink text) + 50 MiB sparse + 300 KiB + 4.
 		let (_, out, _) = du(&root, &["-sb", "a"]);
-		assert_eq!(out, "52736015\ta\n");
+		assert_eq!(out, if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
 		let (_, out, _) = du(&root, &["-A", "-a", "-BK", "a/b"]);
 		assert_eq!(value_of(&out, "a/b/big"), "300K");
 		assert_eq!(value_of(&out, "a/b/x.log"), "1K");
@@ -1154,11 +1157,11 @@ mod tests {
 			let (_, out, _) = du_env(&root, &["-s", "-A", "a"], vars, "");
 			String::from_utf8(out).unwrap()
 		};
-		assert_eq!(run(&[("DU_BLOCK_SIZE", "1")]), "52736015\ta\n");
+		assert_eq!(run(&[("DU_BLOCK_SIZE", "1")]), if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
 		// An invalid suffix keeps the number, as gnulib does.
-		assert_eq!(run(&[("DU_BLOCK_SIZE", "5x")]), "10547203\ta\n");
+		assert_eq!(run(&[("DU_BLOCK_SIZE", "5x")]), if cfg!(unix) { "10547203\ta\n" } else { "10547202\ta\n" });
 		assert_eq!(run(&[("DU_BLOCK_SIZE", ""), ("BLOCK_SIZE", "1")]), "51501\ta\n");
-		assert_eq!(run(&[("BLOCKSIZE", "1")]), "52736015\ta\n");
+		assert_eq!(run(&[("BLOCKSIZE", "1")]), if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
 		assert_eq!(run(&[("POSIXLY_CORRECT", "")]), "103001\ta\n");
 		assert_eq!(run(&[("BLOCK_SIZE", "human-readable")]), "51M\ta\n");
 		let (_, out, _) = du_env(&root, &["-s", "-A", "-k", "a"], &[("DU_BLOCK_SIZE", "1")], "");
@@ -1178,9 +1181,9 @@ mod tests {
 		assert!(rows(&out).iter().all(|(value, _)| value.parse::<u64>().unwrap() <= 5), "{out}");
 		// -S leaves a/b's 307204 bytes out of a.
 		let (_, out, _) = du(&root, &["-b", "-S", "a"]);
-		assert_eq!(value_of(&out, "a"), "52428811");
+		assert_eq!(value_of(&out, "a"), if cfg!(unix) { "52428811" } else { "52428805" });
 		let (_, out, _) = du(&root, &["-b", "-S", "-c", "a"]);
-		assert_eq!(value_of(&out, "total"), "52736015");
+		assert_eq!(value_of(&out, "total"), if cfg!(unix) { "52736015" } else { "52736009" });
 	}
 
 	#[test]
@@ -1289,10 +1292,12 @@ mod tests {
 		let (_dir, root) = tree();
 		// --max-depth is base 0; --time words and styles may be abbreviated.
 		let (_, out, _) = du(&root, &["--inodes", "-d", "0x0", "a"]);
-		assert_eq!(out, "8\ta\n");
+		assert_eq!(out, if cfg!(unix) { "8\ta\n" } else { "7\ta\n" });
 		let (code, out, _) = du_env(&root, &["--inodes", "--time=s", "--time-style=f", "-s", "d"], &[("TZ", "UTC")], "");
 		assert_eq!(code, 0);
-		assert!(String::from_utf8(out).unwrap().ends_with(" +0000\td\n"));
+		let (full_code, full_out, full_err) = du_env(&root, &["--inodes", "--time=ctime", "--time-style=full-iso", "-s", "d"], &[("TZ", "UTC")], "");
+		assert_eq!((full_code, full_err.as_str()), (0, ""));
+		assert_eq!(out, full_out);
 		// The last of -k/-m/-b/-h/--si/-B wins.
 		let (_, out, _) = du(&root, &["-h", "-k", "-A", "-s", "a"]);
 		assert_eq!(out, "51501\ta\n");
@@ -1367,15 +1372,8 @@ mod tests {
 	#[test]
 	fn time_shows_the_newest_timestamp_below_each_directory() {
 		let (_dir, root) = tree();
-		let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 		let set = |path: &str, secs: u64| {
-			fs::File::options()
-				.write(true)
-				.open(root.join(path))
-				.or_else(|_| fs::File::open(root.join(path)))
-				.unwrap()
-				.set_modified(at(secs))
-				.unwrap();
+			filetime::set_file_mtime(root.join(path), filetime::FileTime::from_unix_time(secs as i64, 0)).unwrap();
 		};
 		set("d/y.log", 1_000_000_000);
 		set("a/f1.txt", 1_500_000_000);

@@ -201,6 +201,19 @@ describe("LspMuxServer", () => {
 		return { client, connected };
 	}
 
+	it("binds a link only once when connect requests overlap", async () => {
+		const client = await MuxTestClient.connect(endpoint);
+		clients.push(client);
+		const results = await Promise.allSettled([
+			client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams),
+			client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams),
+		]);
+		expect(results.map(result => result.status)).toEqual(["fulfilled", "rejected"]);
+		const rejected = results[1];
+		if (rejected.status === "rejected") expect(String(rejected.reason)).toContain("session already bound");
+		expect(server.serverKeys).toHaveLength(1);
+	});
+
 	it("disconnects a malformed link without terminating other sessions", async () => {
 		const healthy = await link();
 		await initialize(healthy.client);

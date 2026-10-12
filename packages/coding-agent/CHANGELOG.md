@@ -11,6 +11,9 @@
 
 ### Fixed
 
+- Preserved directories when Windows normalizes a terminal-dot `rmdir` operand; kept newly merged shell utilities and their regression fixtures compatible with Windows.
+- Waited for LSP mux children to exit on shutdown and finished disconnected sessions' document cleanup before reusing their server.
+
 - Fixed GBK reads and mixed-encoding searches without project policies, nested and external target encoding, large-file decode consistency, and configuration cache refresh; unsafe ambiguous or mixed policy/source writes are refused ([#4](https://github.com/ethan-blue/oh-my-pi/issues/4)).
 
 - Preserved grep's NUL binary-file exclusion before strict encoding validation, including bounded oversized searches and explicit-file fast paths; SQLite caches no longer abort text searches.

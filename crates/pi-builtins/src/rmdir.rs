@@ -138,6 +138,13 @@ fn verbose(host: &mut Host, dir: &OsStr) {
 }
 
 fn rmdir(host: &Host, dir: &OsStr) -> io::Result<()> {
+	// Windows normalizes a terminal dot away; preserve rmdir's refusal to
+	// remove a directory named via its current-directory component.
+	let last = dir.as_encoded_bytes().rsplit(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
+		.find(|part| !part.is_empty());
+	if last == Some(b".".as_slice()) {
+		return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid argument"));
+	}
 	host.fs().remove_dir(host.resolve(dir))
 }
 
@@ -358,5 +365,6 @@ mod tests {
 			run(&root, &["e/."]),
 			(1, String::new(), "rmdir: failed to remove 'e/.': Invalid argument\n".into())
 		);
+		assert!(root.join("e").is_dir(), "refused dot operand must preserve the directory");
 	}
 }

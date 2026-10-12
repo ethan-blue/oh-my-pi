@@ -70,6 +70,7 @@ class Session {
 	boundKey?: string;
 	initialized = false;
 	closed = false;
+	closePromise?: Promise<void>;
 	lastActivity = Date.now();
 
 	constructor(connection: IpcConnection) {
@@ -236,7 +237,7 @@ export class LspMuxServer {
 		};
 		connection.startRaw(onChunk, reason => {
 			if (reason) logger.warn("LSP mux session connection error", { error: reason });
-			void this.#closeSession(session);
+			session.closePromise = this.#closeSession(session);
 		});
 	}
 
@@ -264,6 +265,20 @@ export class LspMuxServer {
 				return;
 			}
 			const key = muxServerKey(params);
+			// Release orphan documents before offering a disconnected session's
+			// process to a new link. Re-select after awaiting to retain exclusivity.
+			await Promise.all(
+				[...this.#servers]
+					.filter(candidate => candidate.key === key)
+					.flatMap(candidate =>
+						[...candidate.sessions].filter(previous => previous.closed).map(previous => previous.closePromise),
+					),
+			);
+			if (session.closed || this.#shuttingDown) return;
+			if (session.server) {
+				this.#sendSession(session, rpcError(message.id, -32600, "session already bound"));
+				return;
+			}
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
 			if (server && server.proc.exitCode !== null) {
 				this.#serverExited(server);
@@ -636,7 +651,10 @@ export class LspMuxServer {
 	}
 
 	async #stopServer(server: ServerInstance): Promise<void> {
-		if (server.stopping) return;
+		if (server.stopping) {
+			await server.proc.exited.catch(() => {});
+			return;
+		}
 		server.stopping = true;
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		const id = server.muxId();
@@ -656,6 +674,7 @@ export class LspMuxServer {
 			logger.warn("LSP mux graceful server shutdown failed", { server: server.key, error: String(error) });
 		} finally {
 			this.#killServer(server);
+			await server.proc.exited.catch(() => {});
 		}
 	}
 

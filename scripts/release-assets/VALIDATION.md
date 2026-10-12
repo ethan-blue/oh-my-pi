@@ -1,41 +1,42 @@
-# ompg v18.9.0-gbk.1 验收记录
+# ompg v18.10.2-gbk.1 验收记录
 
-日期：2026-10-11。Windows x64 AVX2，Bun 1.4.2，Rust nightly-2026-10-06 / MSVC。未签名预发布版。
+Windows x64 AVX2，未签名预发布；Bun 1.4.2，Rust nightly-2026-10-06 / MSVC。
 
-## 来源与构建
+## 来源
 
-- 合并核实的最新官方正式版 OMP v18.9.0，提交 `eec114a9226da698ebc015fd8996a8ca3bc4625c`；不发布后续未验收 main。
-- frozen lockfile 安装与 RPC 四语言代码生成成功。
-- `bun run build:native` 成功：Windows modern 优化构建，143 exports。原生 SHA256：`f05f765e6c605f3d5e4aefc571df0f0e1c80340fe598d3bb7f3b42200ea5080b`。
-- native 链接仍有上游 LNK4217 / wasmtime 警告；加载和回归通过。不宣称构建日志零警告。
-- 独立 EXE 构建、`--version` (`ompg/18.9.0-gbk.1`)、`--smoke-test` (`smoke-test: ok`) 通过；`update --check` 保持 fork 自更新阻断与手动升级指引。
-- 正式发布包要求工作树干净、打包 SHA 与 HEAD 一致；最终源码身份见包内 build-info.json，外层和内层 SHA256SUMS.txt 分别校验资产与文件。
+- 合并官方正式 Release v18.10.2，标签提交 c8913466dd7bf92040de911f8e00e30b8f4e48a2。准备时最新正式版由 v18.10.1 更新至 v18.10.2，已补合并。
+- Issue #4 修复提交 4f790ea75a 在合并前保存；原设计、返工与设计者复核记录均保留于 docs/gbk-handoff/31—34。
+- frozen lockfile 安装、RPC schema 与四语言 SDK 通过官方生成器更新。版本号来自合并后的上游包版本，发行后缀为 gbk.1。
+- 上游 LSP 配置抽取采用公共 config-file-sources；项目公共目录解析保留 .ompg 优先和 .omp 兼容。新增运行目录仍在 ompg 用户根内。
 
-## 本轮门禁
+## 发布门禁
 
-| 检查 | 实测结果 |
-| --- | --- |
-| `bun check` | 通过，退出 0：5986 文件格式、lint、17 包类型检查、Rust fmt / clippy |
-| `bun run test:rs` | 3061 passed、4 skipped，退出 0；doctest 另 1 passed、18 ignored |
-| GBK / PTY / eval / stderr / 消费方 15 文件 | 154 passed、3 skipped、0 failed、584 assertions，退出 0 |
-| Python integration / dispatch / shell 3 文件 | 32 passed、4 skipped、0 failed、149 assertions，退出 0 |
-| read / grep / write / AST / LSP 相邻 10 文件 | 154 passed、11 skipped、0 failed、624 assertions，退出 0 |
-| 身份 / extension / eval / 更新器 11 文件 | 118 passed、6 skipped、7 failed、451 assertions，退出 1；七项失败均为 fs.symlink EPERM 环境阻塞 |
-| 空白检查 | fork 未暂存差异通过；合并暂存差异仅保留上游 SCSS.sublime-syntax 的 EOF 空行提示，排除此已知项后通过 |
-| 安装器隔离回归 | 安装、升级、回退、同版本不同内容拒绝、校验损坏拒绝、保守卸载通过 |
-| 真实 EXE 升级回退 | 18.8.7-gbk.1 → 18.9.0-gbk.1 → 18.8.7-gbk.1，通过字节摘要核对 |
-| 原版共存 | 安装测试前后原版 omp.exe（存在时）的 SHA256 与用户 PATH 不变；更新器 ompg shim 测试保留同目录 omp.cmd |
+以下在 v18.10.2 合并后执行；合并期间旧版本或跨版本构建的结果不作为本版凭据。
 
-本轮新增搜索回归验证 NUL 二进制优先跳过，覆盖目录、显式文件、files-with-matches 与 >4 MiB prefix，策略开关两种路径。真实 advisor grep 消费方恢复通过；无 NUL 的非法文本仍严格拒绝，未更换 codec 或绕过断言。
+| 检查 | 实测 | 范围 |
+| --- | --- | --- |
+| native 优化构建 | 退出 0，146 exports | win32-x64-modern；既有 LNK4217 warning 保留 |
+| GBK 九文件 + ptree-stderr | 173 passed / 0 failed，591 assertions | Issue #4 子集 44 用例；实际运行 10 文件 |
+| Rust 全仓 | 3205 passed / 4 skipped，退出 0 | 34 binaries；doctest 1 passed，ignored 不计通过 |
+| bun check | 退出 0 | lint / format / workspace typecheck / cargo fmt / clippy -D warnings |
+| 相邻读/搜/AST/编辑/写/LSP | 636 passed / 25 skipped / 0 failed，2348 assertions | 68 文件；合并后首次 LSP mux 失败已修复再验 |
+| LSP mux 最终追加回归 | 13 passed / 1 skipped / 0 failed，32 assertions | 含重叠 connect 只绑定一次；不重复计入 68 文件数字 |
+| 配置/发现/dirs | 324 passed / 7 skipped / 6 failed，1079 assertions | 40 文件；6 fail 全是 fs.symlink EPERM，环境阻塞，整套非 PASS |
+| shell/background/fork updater | 188 passed / 8 skipped / 7 failed，455 assertions | 4 文件；7 fail 全是 fs.symlink EPERM；fork updater 拒绝官方替换用例通过 |
+| eval raw capture / PTY / background | 26 passed / 0 failed，103 assertions | 6 文件，包含真实 Python runner 子进程捕获 |
+| 独立 EXE 候选 | 官方构建脚本、--version、--smoke-test、doctor JSON、fork update 阻断通过 | ompg/18.10.2-gbk.1，doctor upstreamVersion 18.10.2 |
+| 安装器候选 | 退出 0 | 真 EXE 18.9.0 → 18.10.2 → 18.9.0；checksum 拒绝、同版本不同字节拒绝、保守卸载、原版 omp 和用户 PATH 保留 |
 
-更新器七项环境阻塞是 npm/Bun/Homebrew 的符号链接目标检测用例，未改系统权限、删除或跳过失败用例。这不作为全部 TypeScript 通过的证据；本 fork 正常自更新被禁用，发布使用另行验证的 Windows install-ompg.ps1。
+native SHA256：`7ef1ed7323ace2eb1e656a8eb48730898f269a0e5585b1573ac67835618dac39`。源码提交及 EXE 字节见 build-info.json 与包内 SHA256SUMS.txt。
 
-## 未验证与边界
+合并后的初次 Rust 测试有 13 个 Windows 前提/实际错误失败；逐项修正后剩 2 个引号/时区前提，再修后全过。测试未替换 symlink、未删断言或把提前返回当 PASS。shell 夹具使用内置 grep；df 按主机卷根断言；du 保留 Unix symlink 夹具并分别校验真实 Windows 夹具，时间戳复用 filetime；dd 注入确定性读错误验证错误分支。
 
-- 全仓 TypeScript 测试未执行；上表只记录列明套件。Rust 测试保留上游 test-only dead-code 警告。
-- Unix 实机与 symlink containment 权限依赖路径未通过验证；不以 Windows 编译冒充 Unix 证明。
-- GBK 显式策略，不猜全部编码，不支持 GB18030；大文件诊断覆盖实际读取窗口。
-- PTY / Python PIPE / JS Buffer 捕获复用 native decoder；ConPTY 已转换字节无法恢复。Python fd-1 无单请求归属，JS 持久 writer 无 EOF 证据时保持 unknown；用户代码内部错误解码的字符串不可逆，继承子进程 raw stdio 不保证经过 JS write hook。
-- 保护模式是工具入口限制，不是 OS 沙箱。外部程序、第三方扩展及可信构建钩子需单独约束。
-- E630 / Keil、真实模型、真实 LSP 服务器端到端、无 AVX2 CPU、其他平台、NumPy / matplotlib 缺依赖分支、同机性能 A/B：未验证。
-- 本文件是上传前本地验收；GitHub 下载回读与公开状态另记 `docs/gbk-handoff/30-release-18.9.0-gbk.1.md`。
+## 使用与验收边界
+
+- GBK 自动推断只读；编辑现存 GBK 文件需要明确工程策略，GB18030 不支持。
+- 搜索 report 模式只说明已搜索范围；跳过/未搜索文件和混合/未知命令输出来源均显式记录。
+- 原版 omp、旧版 ompg 和用户数据保留。新包使用新的版本号，不重传旧版本 ZIP。
+- Unix 实机、真实模型、E630/Keil、真实 ACL 和同机性能 A/B 未验证。
+- Windows EPERM symlink 用例保留为环境阻塞，不改权限、换 hardlink 或删除断言制造通过。
+- 保护模式不是 OS 沙箱，外部程序和可信构建钩子不受 Core 全局文件编码拦截保证。
+- 下载后的 GitHub 资产、包内/外校验、独立 EXE smoke 与隔离升级回退另记最终发布文档。
