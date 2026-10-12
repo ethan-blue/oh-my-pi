@@ -143,6 +143,11 @@ pub fn utf8_ambiguous_with_gbk(bytes: &[u8]) -> bool {
 		&& std::str::from_utf8(bytes).is_ok()
 }
 
+/// Non-ASCII bytes that strictly decode in both codecs with different readings.
+pub fn dual_valid_utf8_with_gbk(bytes: &[u8]) -> bool {
+	utf8_ambiguous_with_gbk(bytes) && gbk_decode_strict(bytes).is_ok()
+}
+
 /// Strictly encode `text` with `encoding`; `Err` carries the byte index and
 /// the first character GBK cannot represent. The result always re-decodes to
 /// `text` (verified before returning).
@@ -357,7 +362,7 @@ pub struct CompiledEncodingPolicy {
 	root:              PathBuf,
 	include:           Vec<GlobMatcher>,
 	overrides:         Vec<(GlobMatcher, TextEncoding)>,
-	default_encoding:  Option<TextEncoding>,
+	default_encoding:  Option<PolicyAssignment>,
 	new_file_encoding: Option<TextEncoding>,
 	/// `false` when the spec said `enabled: false`: `resolve` always answers
 	/// `None` so every consumer keeps upstream UTF-8 behavior.
@@ -367,9 +372,9 @@ pub struct CompiledEncodingPolicy {
 impl CompiledEncodingPolicy {
 	/// Validate `spec` and compile its globs relative to `root`.
 	pub fn compile(root: PathBuf, spec: &EncodingSpec) -> Result<Self, PolicyError> {
-		if spec.schema_version != 1 {
+		if !matches!(spec.schema_version, 1 | 2) {
 			return Err(PolicyError(format!(
-				"unsupported schemaVersion {} (supported: 1)",
+				"unsupported schemaVersion {} (supported: 1, 2)",
 				spec.schema_version
 			)));
 		}
@@ -402,7 +407,21 @@ impl CompiledEncodingPolicy {
 			})
 			.collect::<Result<Vec<_>, PolicyError>>()?;
 		let default_encoding = match &spec.default_encoding {
-			Some(name) => Some(TextEncoding::parse(name).map_err(PolicyError)?),
+			Some(name) => {
+				if name.trim().eq_ignore_ascii_case("auto") {
+					// schemaVersion 2's explicit read branch: per-file strict
+					// UTF-8 then strict GBK inside include scope. Never a
+					// write authorization, so schema 1 keeps rejecting it.
+					if spec.schema_version != 2 {
+						return Err(PolicyError(
+							"defaultEncoding 'auto' requires schemaVersion 2".into(),
+						));
+					}
+					Some(PolicyAssignment::Auto)
+				} else {
+					Some(PolicyAssignment::Fixed(TextEncoding::parse(name).map_err(PolicyError)?))
+				}
+			},
 			None => None,
 		};
 		if !spec.include.is_empty() && default_encoding.is_none() {
@@ -415,7 +434,13 @@ impl CompiledEncodingPolicy {
 		if new_file_encoding.is_none() {
 			return Err(PolicyError("newFileEncoding is required".into()));
 		}
-		if !include.is_empty() && new_file_encoding != default_encoding {
+		// The new/existing consistency rule keeps new files readable within a
+		// fixed-default scope; an `auto` default has no single encoding to
+		// match, and newFileEncoding itself must already be explicit.
+		if !include.is_empty()
+			&& let Some(PolicyAssignment::Fixed(default)) = default_encoding
+			&& new_file_encoding != Some(default)
+		{
 			return Err(PolicyError(
 				"newFileEncoding must equal defaultEncoding within include scope so new files remain \
 				 readable; use matching path overrides for encoding exceptions"
@@ -440,7 +465,7 @@ impl CompiledEncodingPolicy {
 	pub fn resolve(&self, path: &Path, exists: bool) -> Option<TextEncoding> {
 		self
 			.resolve_detailed(path, exists)
-			.map(|resolved| resolved.encoding)
+			.and_then(|resolved| resolved.encoding.fixed())
 	}
 
 	/// [`Self::resolve`] plus whether an explicit override entry selected the
@@ -473,21 +498,46 @@ impl CompiledEncodingPolicy {
 			.iter()
 			.find(|(glob, _)| glob.is_match(relative.as_ref()))
 		{
-			return Some(ResolvedEncoding { encoding: *encoding, from_override: true });
+			return Some(ResolvedEncoding {
+				encoding:      PolicyAssignment::Fixed(*encoding),
+				from_override: true,
+			});
 		}
-		let encoding = if exists {
+		let assignment = if exists {
 			self.default_encoding
 		} else {
-			self.new_file_encoding
+			self.new_file_encoding.map(PolicyAssignment::Fixed)
 		};
-		Some(ResolvedEncoding { encoding: encoding?, from_override: false })
+		Some(ResolvedEncoding { encoding: assignment?, from_override: false })
+	}
+}
+
+/// Read-side assignment a policy gives a path.
+///
+/// `Fixed` carries an explicit encoding. `Auto` (schemaVersion 2 only) means
+/// the include scope reads per file — strict UTF-8 first, then strict GBK —
+/// and is a READ decision only: it never authorizes GBK writes, and new
+/// files still take the policy's explicit `newFileEncoding`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAssignment {
+	Fixed(TextEncoding),
+	Auto,
+}
+
+impl PolicyAssignment {
+	/// The fixed encoding, or `None` for `Auto` (no single encoding).
+	pub const fn fixed(self) -> Option<TextEncoding> {
+		match self {
+			Self::Fixed(encoding) => Some(encoding),
+			Self::Auto => None,
+		}
 	}
 }
 
 /// One policy answer for a path, with what produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedEncoding {
-	pub encoding:      TextEncoding,
+	pub encoding:      PolicyAssignment,
 	/// `true` when an explicit override entry matched; `false` when the
 	/// include scope's default/new-file rule did.
 	pub from_override: bool,
@@ -529,6 +579,12 @@ fn to_forward_slashes(path: &Path) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn dual_valid_ambiguity_requires_both_strict_codecs() {
+		assert!(super::dual_valid_utf8_with_gbk("中文".as_bytes()));
+		assert!(!super::dual_valid_utf8_with_gbk("中\n".as_bytes()));
+		assert!(!super::dual_valid_utf8_with_gbk(b"ASCII ?"));
+	}
 	use super::*;
 
 	fn decode_hex(hex: &str) -> Vec<u8> {
@@ -854,12 +910,44 @@ mod tests {
 		let policy = compiled(POLICY);
 		assert_eq!(
 			policy.resolve_detailed(Path::new("/proj/src/main.c"), true),
-			Some(ResolvedEncoding { encoding: TextEncoding::Gbk, from_override: false })
+			Some(ResolvedEncoding {
+				encoding:      PolicyAssignment::Fixed(TextEncoding::Gbk),
+				from_override: false,
+			})
 		);
 		assert_eq!(
 			policy.resolve_detailed(Path::new("/proj/src/vendor-utf8/x.c"), true),
-			Some(ResolvedEncoding { encoding: TextEncoding::Utf8, from_override: true })
+			Some(ResolvedEncoding {
+				encoding:      PolicyAssignment::Fixed(TextEncoding::Utf8),
+				from_override: true,
+			})
 		);
 		assert_eq!(policy.resolve_detailed(Path::new("/proj/README.md"), true), None);
+	}
+
+	#[test]
+	fn schema2_auto_reads_per_file_but_never_authorizes_fixed_writes() {
+		let spec = spec_json(
+			r#"{"schemaVersion": 2, "enabled": true, "include": ["src/**"],
+			    "defaultEncoding": "auto", "newFileEncoding": "utf8"}"#,
+		);
+		let policy = CompiledEncodingPolicy::compile(PathBuf::from("/proj"), &spec).unwrap();
+		// Read assignment: Auto inside include scope.
+		assert_eq!(
+			policy.resolve_detailed(Path::new("/proj/src/x.c"), true),
+			Some(ResolvedEncoding { encoding: PolicyAssignment::Auto, from_override: false })
+		);
+		// The fixed-encoding view used by write paths: no single encoding.
+		assert_eq!(policy.resolve(Path::new("/proj/src/x.c"), true), None);
+		// New files still take the explicit newFileEncoding.
+		assert_eq!(policy.resolve(Path::new("/proj/src/new.c"), false), Some(TextEncoding::Utf8));
+		// Outside include scope: unmanaged.
+		assert_eq!(policy.resolve(Path::new("/proj/README.md"), true), None);
+		// Schema 1 keeps rejecting auto.
+		let v1 = spec_json(
+			r#"{"schemaVersion": 1, "enabled": true, "include": ["src/**"],
+			    "defaultEncoding": "auto", "newFileEncoding": "utf8"}"#,
+		);
+		assert!(CompiledEncodingPolicy::compile(PathBuf::from("/proj"), &v1).is_err());
 	}
 }

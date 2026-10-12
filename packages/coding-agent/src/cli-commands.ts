@@ -110,6 +110,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.dryBalanceHelp,
 	},
 	{
+		name: "encoding",
+		load: () => import("./commands/encoding").then(m => m.default),
+		help: commandHelp.encodingHelp,
+	},
+	{
 		name: "find",
 		load: () => import("./commands/find").then(m => m.default),
 		help: commandHelp.findHelp,

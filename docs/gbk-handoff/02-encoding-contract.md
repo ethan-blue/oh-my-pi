@@ -3,6 +3,8 @@
 > 2026-10-10 修订：下文保留初期设计背景；当前发布后改进以 [14-issue-remediation-design.md](14-issue-remediation-design.md) 为准。新文件也必须命中 include；override 只细化覆盖范围，不能独立扩大范围。未覆盖的文本按严格 UTF-8 处理，不输出解码替换内容。启用且覆盖非空的策略必须令 newFileEncoding 与 defaultEncoding 一致，混合目录通过 include 内的 override 表达。Python 源码声明与目标编码冲突时写前拒绝。实现及测试状态另见本轮验收记录，不能用设计文档代替验收。
 >
 > 2026-10-11 补充（G4/G5）：见第 9 节——GBK include 命中字节的 UTF-8 歧义诊断协议与子进程输出解码来源协议。两者都只做字节级判定和可观察标注，不做内容猜测，不自动改写明确策略。
+>
+> 2026-10-12 补充（Issue #4）：见第 2 节及 9.3 节——工程配置以 `.ompg/encoding.json` 为新入口（旧 `.omp` 兼容）；全局引入 `textEncoding.readFallback`（默认 `utf8-then-gbk` 只读回退，不授权写）与 `textEncoding.invalidSearchFile`（默认 `report` 局部搜索）；写前必须通过 `assertTextWriteEligibility` 阻止非 UTF-8 未管理文件的静默覆盖破坏。
 
 ## 1. 单一策略、两层接入
 
@@ -14,7 +16,7 @@
 
 ## 2. 项目策略的拟定格式
 
-拟新增 `.omp/encoding.json`，这是 Fork 专用文件，尚未实现。优先使用这个独立文件，避免把未知配置字段写进原版的 `.omp/config.yml`；上游通用设置继续通过原注册机制处理。
+优先使用工程专用的 `.ompg/encoding.json`（同时完整兼容既有 `.omp/encoding.json` 作为别名入口）。优先使用这个独立文件，避免把未知配置字段写进原版的 `.ompg/config.yml` 或 `.omp/config.yml`；上游通用设置继续通过原注册机制处理。同 root 内 `.ompg` 整份优先，不跨目录字段级合并；新入口损坏时 fail closed，不隐式回退旧配置。
 
 ```json
 {
@@ -33,11 +35,11 @@
 
 | 情形 | 规定行为 |
 | --- | --- |
-| 无策略文件 / enabled=false | 保持原有工具行为，不全局扫描、转码或猜测 |
+| 无策略文件 / enabled=false | 默认走只读 `utf8-then-gbk` 回退（严 UTF-8 优先，合法 GBK 返回只读并附通知）；`strict-utf8` 模式下维持原有严格报错。回退推断绝不授权 GBK 写入 |
 | 命中 include 的文件 | 使用匹配的 override；无 override 时使用 defaultEncoding |
 | 多条 override 命中 | 第一条生效，顺序写进文档和测试 |
 | 新文件 | 路径 override 优先，否则 newFileEncoding；不得仅依据扩展名猜测 |
-| 未命中 include | 保持上游行为；不得自动按 GBK 解释所有文件 |
+| 未命中 include | 可按全局只读 fallback 查阅（并指出未命中规则）；不继承该工程 default 编码，写前需明确覆盖范围 |
 | ASCII 文件 | 编码来自规则，不标记为“探测出 UTF-8” |
 | 明确 GBK 规则遇到 UTF-8 BOM | 报告策略冲突，要求路径 override；不静默选择另一种编码 |
 | 非法/未知编码值 | 启动或首次解析明确失败，不能退化成 UTF-8 保存 |
@@ -167,3 +169,22 @@ P02 结束时写一个短 ADR，记录 codec 选择、策略 root、模块边界
 **JS**：默认 / UTF-8 encoding 的 `process.stdout/stderr.write(Uint8Array)` 经 worker 原 bytes 帧进入 host native decoder，按 runId 隔离，保留跨 chunk carry；纯字符串与明确指定其他 Buffer encoding 的原文本行为保留。请求完成不是持久 stdout/stderr 的 EOF；这些活跃 byte writer 计 unknown，不 finish 来伪造完整摘要。worker shared runtime 保持无 native addon 导入；继承原始子进程 stdio 而绕过 write hook 的路径不能冒称覆盖。
 
 **策略缓存（R4 关联约定）**：`.omp/encoding.json` 的编译缓存与 edit store 的策略同步都必须以**文件内容**（JSON 文本）参与一致性判断；mtime/size 只能作性能提示，不能单独证明配置未变。同 mtime 的内容改写（含同字节的 override 重排、启停切换）必须在下一次 discovery 生效，并触发快照清空。
+
+### 9.3 Issue #4 配置发现与容错搜索协议（2026-10-12）
+
+目标是让无工程编码配置的合法 GBK 固件源码可被原生 read/grep 查阅，使 `.ompg` 真正贯通，同时防止自动推断引发代码回写破坏：
+
+| 规则 | 规定行为 |
+| --- | --- |
+| 配置发现入口 | 统一目录 resolver 探测目标文件所属工程边界；同一 root 内 `.ompg/encoding.json` 优先于 `.omp/encoding.json`；损坏/权限拒绝时 fail closed 报错，绝不静默降级为旧配置或假定 UTF-8 |
+| 目录边界隔离 | 探测向上查找在到达用户 home（`~/.ompg`、`PI_CONFIG_DIR`、`os.homedir()`）之前停止；探测过含 `.git` 的根目录后停止向上继承，避免跨工程策略泄漏 |
+| 只读自动回退 | 全局设置 `textEncoding.readFallback`（默认 `utf8-then-gbk`，可选 `strict-utf8`）。未管理文件在严格 UTF-8 失败且严格 GBK 成功时返回 GBK 文本，但附显式自动推断只读通知；该推断绝不授权写 |
+| 写入资格预检 | `assertTextWriteEligibility` 门禁覆盖 `WriteTool`、`EditTool`（含批处理前置检查）、`LSP` 文本修改、`AST` 写入：未管理/auto 的现存文件若非严格 UTF-8，写前直接拒绝并指导创建策略，防止被上游默认 UTF-8 写路径静默覆盖破坏；批量编辑任一目标不符合则整批拒写 |
+| 容错搜索模式 | `textEncoding.invalidSearchFile`（默认 `report`，可选 `fail`）。report 模式下跳过无法解码的文件，返回 `searchComplete: false` 与精确计数/有界样本；零命中时明确输出“已搜索文件中零命中，N 个文件未搜索”，绝不冒充全工程无结果；fail 模式维持遇到解码错误即刻中断 |
+| schemaVersion 2 | 新增模式支持 `defaultEncoding: "auto"`（混合目录 UTF-8 优先，失败转严格 GBK）；`newFileEncoding` 仍必须是明确的 `utf8` 或 `gbk` |
+| auto 写资格 | 无 BOM 的非 ASCII 文件只有同时通过严格 UTF-8 与严格 GBK 才属于双合法歧义，写前要求显式 override；只通过 UTF-8 的文件不被误拒绝。GBK 推断仍只读 |
+| 流式只读回退 | 一次扫描只使用一种严格 decoder；UTF-8 验证失败时丢弃该次收集结果，关闭句柄并按 GBK 重新扫描同一请求。不能用截断的 64 KiB 探测决定编码，也不能保留之前按 UTF-8 解码的行后中途切换。选择行数、字节预算、取消和 seek 的文件身份检查继续有效 |
+| 原生目标策略 | edit 文件读取/新建/快照、grep 与 AST 按目标路径先检查更近的子工程，再使用调用捕获的根策略。查找失败必须传播；坏配置不能退到 alias/父策略/无策略。搜索的目录结果（含失败）在单次调用内缓存 |
+| 配置变更批次 | 编码/保护/项目设置配置与普通源码修改分开调用；edit/apply_patch 与 LSP 在第一次写入前拒绝混合批次。成功写、删、移动任一命名空间中的配置后立即清除发现缓存；权限回退写入也走同一失效入口 |
+| 配置资源兼容 | singleton 设置/MCP 按对应文件选择 `.ompg` 或同 root 的 `.omp`，不字段合并；只有 encoding.json 的 `.ompg` 不遮住旧 SYSTEM.md/RULES.md/AGENTS.md。项目模型角色保存与 MCP 配置路径应指向实际选中的配置 |
+| 原生管理命令 | 新增 CLI 命令：`ompg encoding doctor [path] --json` 检查目标文件/工程的策略归属、有效 codec 与写资格；`ompg encoding init --path <工程> --profile gbk-source` 幂等生成 `.ompg/encoding.json` 并即时刷新缓存 |

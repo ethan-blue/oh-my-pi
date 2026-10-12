@@ -110,53 +110,64 @@ pub struct SearchOptions {
 #[napi(object, object_to_js = false)]
 pub struct GrepOptions<'env> {
 	/// Regex pattern to search for.
-	pub pattern:            String,
+	pub pattern:                 String,
 	/// Directory or file to search: a host path or an absolute `scheme://` URL.
-	pub path:               String,
+	pub path:                    String,
 	/// Glob filter for filenames (e.g., "*.ts").
-	pub glob:               Option<String>,
+	pub glob:                    Option<String>,
 	/// Match simple glob patterns at any depth (default: true; `*.ts` ->
 	/// `**/*.ts`). Set false when `glob` is already relative to `path`.
-	pub recursive:          Option<bool>,
+	pub recursive:               Option<bool>,
 	/// Filter by file type (e.g., "js", "py", "rust").
-	pub r#type:             Option<String>,
+	pub r#type:                  Option<String>,
 	/// Case-insensitive search.
-	pub ignore_case:        Option<bool>,
+	pub ignore_case:             Option<bool>,
 	/// Enable multiline matching.
-	pub multiline:          Option<bool>,
+	pub multiline:               Option<bool>,
 	/// Include hidden files (default: true).
-	pub hidden:             Option<bool>,
+	pub hidden:                  Option<bool>,
 	/// Respect .gitignore files (default: true).
-	pub gitignore:          Option<bool>,
+	pub gitignore:               Option<bool>,
 	/// Maximum number of matches to return.
-	pub max_count:          Option<u32>,
+	pub max_count:               Option<u32>,
 	/// Skip first N matches.
-	pub offset:             Option<u32>,
+	pub offset:                  Option<u32>,
 	/// Lines of context before matches.
-	pub context_before:     Option<u32>,
+	pub context_before:          Option<u32>,
 	/// Lines of context after matches.
-	pub context_after:      Option<u32>,
+	pub context_after:           Option<u32>,
 	/// Lines of context before/after matches (legacy).
-	pub context:            Option<u32>,
+	pub context:                 Option<u32>,
 	/// Truncate lines longer than this (characters).
-	pub max_columns:        Option<u32>,
+	pub max_columns:             Option<u32>,
 	/// Output mode (content, filesWithMatches, or count).
-	pub mode:               Option<GrepOutputMode>,
+	pub mode:                    Option<GrepOutputMode>,
 	/// Maximum matches collected per file (content mode). Keeps one hot file
 	/// from exhausting the global `max_count` budget before other files are
 	/// reached.
-	pub max_count_per_file: Option<u32>,
+	pub max_count_per_file:      Option<u32>,
 	/// Project encoding policy (`.omp/encoding.json`): GBK-managed files are
 	/// strictly transcoded to UTF-8 before matching, so Chinese
 	/// patterns match and result lines render correctly.
-	pub encoding_policy:    Option<crate::encoding::EncodingPolicyOptions>,
+	pub encoding_policy:         Option<crate::encoding::EncodingPolicyOptions>,
+	/// Multi-root encoding policies (nearest project root wins per file).
+	/// Mutually exclusive with `encodingPolicy`.
+	pub encoding_policies:       Option<Vec<crate::encoding::EncodingPolicyOptions>>,
+	/// `"report"` skips files that cannot be decoded and reports them
+	/// (`searchComplete=false` plus bounded samples); `"fail"` (default)
+	/// aborts the search with an actionable encoding error.
+	pub on_undecodable:          Option<String>,
+	/// `"utf8-then-gbk"` reads files no policy manages as strict UTF-8
+	/// first, then strict GBK (read-only fallback, never applied to explicit
+	/// UTF-8/GBK assignments); `"strict-utf8"` (default) refuses them.
+	pub unmanaged_read_fallback: Option<String>,
 	/// Abort signal for cancelling the operation.
-	pub signal:             Option<Unknown<'env>>,
+	pub signal:                  Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
-	pub timeout_ms:         Option<u32>,
+	pub timeout_ms:              Option<u32>,
 	/// Filesystem every path is stat'ed, walked, and read through (native when
 	/// absent).
-	pub filesystem:         Option<ShellFilesystem>,
+	pub filesystem:              Option<ShellFilesystem>,
 	/// Stream results instead of returning them: called on the JS thread with
 	/// batches (at most 1024 entries, files in no particular order) of what
 	/// `matches` would hold, while the search runs. A slow callback pauses the
@@ -166,7 +177,7 @@ pub struct GrepOptions<'env> {
 	/// A throw rejects the search with it. Incompatible with `maxCount` and
 	/// `offset`.
 	#[napi(ts_type = "(matches: GrepMatch[]) => void")]
-	pub on_matches:         Option<GrepStreamCallback>,
+	pub on_matches:              Option<GrepStreamCallback>,
 }
 
 /// A context line (before or after a match).
@@ -256,7 +267,31 @@ pub struct GrepResult {
 	/// override resolves which one is right. The search still follows the
 	/// policy — this is a diagnostic, never an encoding switch.
 	pub ambiguous_encoding_files: Option<Vec<String>>,
+	/// `Some(false)` when files that could not be decoded were skipped in
+	/// report mode — the matches describe only the successfully searched
+	/// files, never "no results anywhere".
+	pub search_complete:          Option<bool>,
+	/// Number of files skipped because neither strict UTF-8 nor the policy
+	/// encoding could decode them (report mode).
+	pub undecodable_file_count:   Option<u32>,
+	/// Bounded samples (path + reason) of the undecodable files; the count
+	/// above is exact, this list is capped.
+	pub undecodable_files:        Option<Vec<GrepUndecodableFile>>,
 }
+
+/// A file skipped in report mode because it could not be decoded.
+#[napi(object)]
+#[derive(Clone)]
+pub struct GrepUndecodableFile {
+	/// Path as it would appear in matches.
+	pub path:   String,
+	/// Why the file could not be searched (encoding + offset; never content).
+	pub reason: String,
+}
+
+/// Cap on undecodable-file samples in [`GrepResult::undecodable_files`]; the
+/// count field stays exact.
+const UNDECODABLE_SAMPLES_CAP: usize = 20;
 
 /// Cap on files listed in [`GrepResult::ambiguous_encoding_files`]; beyond it
 /// the diagnostic stays silent rather than flooding a broad search.
@@ -1016,8 +1051,9 @@ pub(crate) struct GrepConfig {
 	pub(crate) max_columns:        Option<u32>,
 	pub(crate) mode:               Option<GrepOutputMode>,
 	pub(crate) max_count_per_file: Option<u32>,
-	/// Project encoding policy; GBK-managed files transcode before matching.
-	pub(crate) encoding:           Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	/// Per-search encoding decisions (multi-root policies, undecodable-file
+	/// mode, unmanaged read fallback).
+	pub(crate) encoding:           std::sync::Arc<crate::encoding::SearchEncoding>,
 	/// Filesystem the search path is resolved, walked, and read through.
 	pub(crate) filesystem:         BlockingFs,
 	/// Receives results while searching instead of the returned `matches`.
@@ -1409,6 +1445,9 @@ enum FileOutcome {
 	SkippedOversized,
 	/// Unreadable / not a regular file; ignored.
 	Skipped,
+	/// The file could not be decoded as text (typed message). Report mode
+	/// records it and continues; fail mode aborts.
+	Undecodable(String),
 }
 
 /// Shared accumulator across both search passes.
@@ -1420,8 +1459,8 @@ enum FileOutcome {
 struct PassState<'a> {
 	/// Filesystem every candidate is read through.
 	fs:                     BlockingFs,
-	/// Project encoding policy; GBK-managed files transcode before matching.
-	encoding:               Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	/// Per-search encoding decisions shared by every worker.
+	encoding:               std::sync::Arc<crate::encoding::SearchEncoding>,
 	results:                Mutex<Vec<FileSearchResult>>,
 	deferred:               Mutex<Vec<pi_walker::FileCandidate>>,
 	files_searched:         AtomicU64,
@@ -1430,6 +1469,10 @@ struct PassState<'a> {
 	/// Files whose GBK include-rule decode was byte-ambiguously also valid
 	/// UTF-8 (capped at [`AMBIGUOUS_ENCODING_FILES_CAP`] entries).
 	ambiguous_files:        Mutex<Vec<String>>,
+	/// Bounded samples of report-mode undecodable files.
+	undecodable_samples:    Mutex<Vec<GrepUndecodableFile>>,
+	/// Exact count of report-mode undecodable files (never capped).
+	undecodable_count:      AtomicU64,
 	sink:                   Option<&'a dyn MatchSink>,
 	streamed_matches:       AtomicU64,
 	streamed_files:         AtomicU64,
@@ -1451,19 +1494,61 @@ impl PassState<'_> {
 		let files = self.ambiguous_files.lock();
 		(!files.is_empty()).then(|| files.clone())
 	}
+
+	/// Record one report-mode undecodable file (message only; no content).
+	fn note_undecodable_file(&self, path: &str, message: &str) {
+		self.undecodable_count.fetch_add(1, Ordering::Relaxed);
+		let mut samples = self.undecodable_samples.lock();
+		if samples.len() < UNDECODABLE_SAMPLES_CAP {
+			samples.push(GrepUndecodableFile { path: path.to_owned(), reason: message.to_owned() });
+		}
+	}
+
+	/// `Some(false)` when report mode skipped undecodable files, else `None`.
+	fn search_complete(&self) -> Option<bool> {
+		(self.undecodable_count.load(Ordering::Relaxed) > 0).then_some(false)
+	}
+
+	/// Exact undecodable count, `None` when zero.
+	fn undecodable_file_count(&self) -> Option<u32> {
+		let count = self.undecodable_count.load(Ordering::Relaxed);
+		(count > 0).then(|| crate::utils::clamp_u32(count))
+	}
+
+	/// Bounded undecodable samples, `None` when empty.
+	fn undecodable_files(&self) -> Option<Vec<GrepUndecodableFile>> {
+		let samples = self.undecodable_samples.lock();
+		(!samples.is_empty()).then(|| samples.clone())
+	}
+}
+
+/// Report-mode undecodable-file summary carried out of a search: exact count
+/// plus bounded samples.
+#[derive(Default)]
+struct UndecodableSummary {
+	samples: Vec<GrepUndecodableFile>,
+	count:   u64,
+}
+
+type GrepPassResult = (Vec<FileSearchResult>, u64, u64, Vec<String>, UndecodableSummary);
+
+impl PassState<'_> {
+	fn undecodable_summary(&self) -> UndecodableSummary {
+		UndecodableSummary {
+			samples: self.undecodable_samples.lock().clone(),
+			count:   self.undecodable_count.load(Ordering::Relaxed),
+		}
+	}
 }
 
 impl<'a> PassState<'a> {
-	fn new(
-		fs: &BlockingFs,
-		encoding: Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
-	) -> Self {
+	fn new(fs: &BlockingFs, encoding: std::sync::Arc<crate::encoding::SearchEncoding>) -> Self {
 		Self::with_sink(fs, encoding, None)
 	}
 
 	fn with_sink(
 		fs: &BlockingFs,
-		encoding: Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+		encoding: std::sync::Arc<crate::encoding::SearchEncoding>,
 		sink: Option<&'a dyn MatchSink>,
 	) -> Self {
 		Self {
@@ -1475,6 +1560,8 @@ impl<'a> PassState<'a> {
 			skipped_oversized: AtomicU64::default(),
 			emitted: AtomicU64::default(),
 			ambiguous_files: Mutex::default(),
+			undecodable_samples: Mutex::default(),
+			undecodable_count: AtomicU64::default(),
 			sink,
 			streamed_matches: AtomicU64::default(),
 			streamed_files: AtomicU64::default(),
@@ -1504,7 +1591,30 @@ impl<'a> PassState<'a> {
 			skipped_oversized:        (skipped_oversized > 0)
 				.then(|| crate::utils::clamp_u32(skipped_oversized)),
 			ambiguous_encoding_files: self.ambiguous_encoding_files(),
+			search_complete:          self.search_complete(),
+			undecodable_file_count:   self.undecodable_file_count(),
+			undecodable_files:        self.undecodable_files(),
 		}
+	}
+}
+
+/// Report-mode single-file outcome: zero matches, the file explicitly marked
+/// not-searched — never presented as "no results".
+fn undecodable_single_file_result(path: &Path, message: &str) -> GrepResult {
+	GrepResult {
+		matches:                  Vec::new(),
+		total_matches:            0,
+		files_with_matches:       0,
+		files_searched:           0,
+		limit_reached:            None,
+		skipped_oversized:        None,
+		ambiguous_encoding_files: None,
+		search_complete:          Some(false),
+		undecodable_file_count:   Some(1),
+		undecodable_files:        Some(vec![GrepUndecodableFile {
+			path:   path.to_string_lossy().into_owned(),
+			reason: message.to_owned(),
+		}]),
 	}
 }
 
@@ -1530,21 +1640,32 @@ fn stream_file_entry(
 /// Used by the deferred oversized pass: files larger than the cap are searched
 /// only over their leading window. Strict validation covers that bounded
 /// window; an incomplete trailing character is withheld and unread tails keep
-/// the upstream partial-search semantics.
+/// the upstream partial-search semantics. `enc` decides the window's strict
+/// decode order per file (fixed assignment, or UTF-8→GBK for auto/unmanaged
+/// fallback files).
 fn read_file_prefix(
 	fs: &BlockingFs,
 	path: &Path,
 	buffer: &mut Vec<u8>,
-	policy: Option<&pi_edit::encoding::CompiledEncodingPolicy>,
+	enc: &crate::encoding::SearchEncoding,
 ) -> io::Result<ReadFile> {
-	let file = match fs.open(path) {
-		Ok(file) => file,
-		Err(err)
-			if matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) =>
-		{
-			return Ok(ReadFile::Skipped);
-		},
-		Err(err) => return Err(err),
+	const ABORT_HINT: &str = "search aborted without decoding substitutions. Check this project's \
+	                          .omp/encoding.json (or .ompg/encoding.json) include rules and \
+	                          explicit encoding overrides; outside-root files require their own \
+	                          project context";
+	let open = || -> io::Result<Option<File>> {
+		match fs.open(path) {
+			Ok(file) => Ok(Some(file)),
+			Err(err)
+				if matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) =>
+			{
+				Ok(None)
+			},
+			Err(err) => Err(err),
+		}
+	};
+	let Some(file) = open()? else {
+		return Ok(ReadFile::Skipped);
 	};
 	let metadata = file.metadata()?;
 	if !metadata.is_file() {
@@ -1555,26 +1676,39 @@ fn read_file_prefix(
 		buffer.clear();
 		return Ok(ReadFile::Read);
 	}
-	let encoding = policy
-		.and_then(|p| p.resolve(path, true))
-		.unwrap_or(pi_edit::encoding::TextEncoding::Utf8);
-	let prefix =
-		pi_edit::encoding::read_validated_prefix(file, MAX_FILE_BYTES as usize, encoding, Some(0))
-			.map_err(|err| {
-				if err.kind() == io::ErrorKind::InvalidData {
-					io::Error::new(
-						err.kind(),
-						format!(
-							"{}: {err}; search aborted without decoding substitutions. Check this \
-							 project's .omp/encoding.json include rules and explicit encoding overrides; \
-							 outside-root files require their own project context",
-							path.display()
-						),
-					)
-				} else {
-					err
-				}
-			})?;
+	use crate::encoding::PrefixDecodeMode;
+	let read_validated =
+		|encoding: pi_edit::encoding::TextEncoding, file: File| -> io::Result<Option<Vec<u8>>> {
+			pi_edit::encoding::read_validated_prefix(file, MAX_FILE_BYTES as usize, encoding, Some(0))
+				.map_err(|err| {
+					if err.kind() == io::ErrorKind::InvalidData {
+						io::Error::new(err.kind(), format!("{}: {err}; {ABORT_HINT}", path.display()))
+					} else {
+						err
+					}
+				})
+		};
+	let mode = enc
+		.prefix_mode(path)
+		.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+	let prefix = match mode {
+		PrefixDecodeMode::Utf8 => read_validated(pi_edit::encoding::TextEncoding::Utf8, file)?,
+		PrefixDecodeMode::Gbk => read_validated(pi_edit::encoding::TextEncoding::Gbk, file)?,
+		PrefixDecodeMode::Utf8ThenGbk => {
+			// Strict UTF-8 first; on an invalid window retry the same window
+			// strictly as GBK before failing.
+			match read_validated(pi_edit::encoding::TextEncoding::Utf8, file) {
+				Ok(prefix) => prefix,
+				Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+					let Some(retry) = open()? else {
+						return Ok(ReadFile::Skipped);
+					};
+					read_validated(pi_edit::encoding::TextEncoding::Gbk, retry)?
+				},
+				Err(err) => return Err(err),
+			}
+		},
+	};
 	let Some(prefix) = prefix else {
 		buffer.clear();
 		return Ok(ReadFile::Skipped);
@@ -1594,25 +1728,22 @@ fn search_one_file<M: Matcher + Sync>(
 	file: &pi_walker::FileCandidate,
 	file_params: SearchParams,
 	policy: ReadPolicy,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	enc: &crate::encoding::SearchEncoding,
 	sink: Option<&dyn MatchSink>,
 ) -> Result<(FileOutcome, bool)> {
 	let read = match policy {
 		ReadPolicy::Full => {
 			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
 		},
-		ReadPolicy::Prefix => {
-			read_file_prefix(fs, &file.path, &mut worker.buffer, encoding.map(AsRef::as_ref))
-		},
+		ReadPolicy::Prefix => read_file_prefix(fs, &file.path, &mut worker.buffer, enc),
 	};
 	let transcode = match read {
 		// Match the searcher's NUL binary rule before strict text decoding.
 		Ok(ReadFile::Read) if worker.buffer.contains(&0) => return Ok((FileOutcome::Skipped, false)),
-		Ok(ReadFile::Read) => crate::encoding::transcode_search_strict(
-			&mut worker.buffer,
-			&file.path,
-			encoding.map(AsRef::as_ref),
-		)?,
+		Ok(ReadFile::Read) => match enc.transcode(&mut worker.buffer, &file.path) {
+			Ok(transcode) => transcode,
+			Err(failure) => return Ok((FileOutcome::Undecodable(failure.message), false)),
+		},
 		Ok(ReadFile::Oversized) => return Ok((FileOutcome::Defer, false)),
 		Ok(ReadFile::Skipped) => {
 			return Ok(match policy {
@@ -1688,6 +1819,13 @@ fn handle_file<M: Matcher + Sync>(
 			state.skipped_oversized.fetch_add(1, Ordering::Relaxed);
 		},
 		FileOutcome::Skipped => {},
+		FileOutcome::Undecodable(message) => {
+			if state.encoding.report_undecodable {
+				state.note_undecodable_file(&file.relative, &message);
+			} else {
+				return Err(Error::from_reason(message));
+			}
+		},
 		FileOutcome::Searched(search) => {
 			state.files_searched.fetch_add(1, Ordering::Relaxed);
 			if search.match_count > 0
@@ -1783,11 +1921,11 @@ fn process_candidates<M: Matcher + Sync>(
 	params: SearchParams,
 	parallel_allowed: bool,
 	stop_after_matches: Option<u64>,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	encoding: &std::sync::Arc<crate::encoding::SearchEncoding>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
+) -> Result<GrepPassResult> {
 	let file_params = per_file_params(params);
-	let state = PassState::new(fs, encoding.cloned());
+	let state = PassState::new(fs, std::sync::Arc::clone(encoding));
 
 	// Partition oversized-by-hint files out of pass 1 up front; files without a
 	// size hint stay in pass 1 and are deferred at read time if oversized.
@@ -1837,6 +1975,7 @@ fn process_candidates<M: Matcher + Sync>(
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
 		state.ambiguous_files.lock().clone(),
+		state.undecodable_summary(),
 	))
 }
 
@@ -1850,10 +1989,10 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	encoding: &std::sync::Arc<crate::encoding::SearchEncoding>,
 	ct: &task::CancelToken,
 	stop_after_matches: Option<u64>,
-) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
+) -> Result<GrepPassResult> {
 	let Some(candidates) = collect_grep_candidates(
 		fs,
 		search_path,
@@ -1866,7 +2005,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 		ct,
 	)?
 	else {
-		return Ok((Vec::new(), 0, 0, Vec::new()));
+		return Ok((Vec::new(), 0, 0, Vec::new(), UndecodableSummary::default()));
 	};
 	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, encoding, ct)
 }
@@ -1972,10 +2111,10 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	encoding: &std::sync::Arc<crate::encoding::SearchEncoding>,
 	ct: &task::CancelToken,
 	stop_after_matches: u64,
-) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
+) -> Result<GrepPassResult> {
 	let request = build_grep_walk_request(
 		fs,
 		search_path,
@@ -1986,7 +2125,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		pi_walker::WalkOrder::Path,
 	)?;
 	let file_params = per_file_params(params);
-	let state = PassState::new(fs, encoding.cloned());
+	let state = PassState::new(fs, std::sync::Arc::clone(encoding));
 	let mut window = Vec::with_capacity(GREP_STREAM_WINDOW);
 	let mut results = Vec::new();
 
@@ -2058,6 +2197,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
 		state.ambiguous_files.lock().clone(),
+		state.undecodable_summary(),
 	))
 }
 
@@ -2071,13 +2211,13 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	include_hidden: bool,
 	use_gitignore: bool,
 	skip_node_modules: bool,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	encoding: &std::sync::Arc<crate::encoding::SearchEncoding>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64, Vec<String>)> {
+) -> Result<GrepPassResult> {
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
 		None => {
-			let state = PassState::new(fs, encoding.cloned());
+			let state = PassState::new(fs, std::sync::Arc::clone(encoding));
 			let results = run_parallel_streaming_grep(
 				&state,
 				search_path,
@@ -2095,6 +2235,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				state.skipped_oversized.load(Ordering::Relaxed),
 				state.files_searched.load(Ordering::Relaxed),
 				state.ambiguous_files.lock().clone(),
+				state.undecodable_summary(),
 			))
 		},
 		Some(stop) if stop <= ORDERED_STREAMING_STOP_MAX_COUNT || pi_walker::walk_workers() <= 1 => {
@@ -2325,7 +2466,8 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	matcher: &M,
 ) -> Result<GrepResult> {
 	let fs = &options.filesystem;
-	let encoding = options.encoding.clone();
+	// The napi boundary already compiled the per-search encoding decisions.
+	let encoding = std::sync::Arc::clone(&options.encoding);
 	let search_path = iofs::absolute_search_path(&options.path)?;
 	let metadata = fs
 		.metadata(&search_path)
@@ -2381,6 +2523,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			limit_reached:            None,
 			skipped_oversized:        None,
 			ambiguous_encoding_files: None,
+			search_complete:          None,
+			undecodable_file_count:   None,
+			undecodable_files:        None,
 		});
 	}
 
@@ -2396,6 +2541,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				limit_reached:            None,
 				skipped_oversized:        None,
 				ambiguous_encoding_files: None,
+				search_complete:          None,
+				undecodable_file_count:   None,
+				undecodable_files:        None,
 			});
 		}
 
@@ -2403,9 +2551,12 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		match read_file_bytes(fs, &search_path, &mut buffer) {
 			Ok(ReadFile::Read) => {},
 			Ok(ReadFile::Oversized) => {
-				match read_file_prefix(fs, &search_path, &mut buffer, encoding.as_deref()) {
+				match read_file_prefix(fs, &search_path, &mut buffer, &encoding) {
 					Ok(ReadFile::Read) => {},
 					Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+						if encoding.report_undecodable {
+							return Ok(undecodable_single_file_result(&search_path, &err.to_string()));
+						}
 						return Err(Error::from_reason(err.to_string()));
 					},
 					_ => {
@@ -2417,6 +2568,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 							limit_reached:            None,
 							skipped_oversized:        Some(1),
 							ambiguous_encoding_files: None,
+							search_complete:          None,
+							undecodable_file_count:   None,
+							undecodable_files:        None,
 						});
 					},
 				}
@@ -2430,6 +2584,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					limit_reached:            None,
 					skipped_oversized:        None,
 					ambiguous_encoding_files: None,
+					search_complete:          None,
+					undecodable_file_count:   None,
+					undecodable_files:        None,
 				});
 			},
 		}
@@ -2442,10 +2599,20 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				limit_reached:            None,
 				skipped_oversized:        None,
 				ambiguous_encoding_files: None,
+				search_complete:          None,
+				undecodable_file_count:   None,
+				undecodable_files:        None,
 			});
 		}
-		let transcode =
-			crate::encoding::transcode_search_strict(&mut buffer, &search_path, encoding.as_deref())?;
+		let transcode = match encoding.transcode(&mut buffer, &search_path) {
+			Ok(transcode) => transcode,
+			Err(failure) => {
+				if encoding.report_undecodable {
+					return Ok(undecodable_single_file_result(&search_path, &failure.message));
+				}
+				return Err(Error::from_reason(failure.message));
+			},
+		};
 		let single_ambiguous = transcode
 			.utf8_ambiguous
 			.then(|| vec![search_path.to_string_lossy().into_owned()]);
@@ -2464,6 +2631,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					limit_reached:            None,
 					skipped_oversized:        None,
 					ambiguous_encoding_files: single_ambiguous,
+					search_complete:          None,
+					undecodable_file_count:   None,
+					undecodable_files:        None,
 				});
 			}
 
@@ -2485,6 +2655,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				limit_reached:            None,
 				skipped_oversized:        None,
 				ambiguous_encoding_files: single_ambiguous,
+				search_complete:          None,
+				undecodable_file_count:   None,
+				undecodable_files:        None,
 			});
 		}
 
@@ -2511,6 +2684,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				limit_reached:            None,
 				skipped_oversized:        None,
 				ambiguous_encoding_files: single_ambiguous,
+				search_complete:          None,
+				undecodable_file_count:   None,
+				undecodable_files:        None,
 			});
 		}
 
@@ -2556,6 +2732,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			limit_reached: if limit_reached { Some(true) } else { None },
 			skipped_oversized: None,
 			ambiguous_encoding_files: single_ambiguous,
+			search_complete: None,
+			undecodable_file_count: None,
+			undecodable_files: None,
 		});
 	}
 
@@ -2586,10 +2765,10 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		include_hidden,
 		use_gitignore,
 		!mentions_node_modules,
-		encoding.as_ref(),
+		&encoding,
 		&ct,
 	)?;
-	let (results, skipped_oversized, files_searched, ambiguous_files) = results;
+	let (results, skipped_oversized, files_searched, ambiguous_files, undecodable) = results;
 	let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
 		aggregate_parallel_results(results, params, files_searched);
 
@@ -2613,6 +2792,12 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			None
 		},
 		ambiguous_encoding_files: (!ambiguous_files.is_empty()).then_some(ambiguous_files),
+		// Zero matches plus skipped files is NOT "no results anywhere": the
+		// count is exact, the samples bounded.
+		search_complete: (undecodable.count > 0).then_some(false),
+		undecodable_file_count: (undecodable.count > 0)
+			.then(|| crate::utils::clamp_u32(undecodable.count)),
+		undecodable_files: (!undecodable.samples.is_empty()).then_some(undecodable.samples),
 	})
 }
 
@@ -2870,12 +3055,55 @@ pub fn grep<'env>(
 		filesystem,
 		on_matches,
 		encoding_policy,
+		encoding_policies,
+		on_undecodable,
+		unmanaged_read_fallback,
 	} = options;
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback, ct.clone())));
 	let filesystem = ShellFilesystem::blocking(filesystem);
-	let encoding = crate::encoding::compile_policy_options(encoding_policy.as_ref())?;
+	// Modes are validated here so the compiled view inside `grep_sync` is
+	// already normalized.
+	let report_undecodable = match on_undecodable.as_deref().map(str::trim) {
+		None | Some("" | "fail") => false,
+		Some("report") => true,
+		Some(other) => {
+			return Err(Error::from_reason(format!(
+				"unknown onUndecodable '{other}' (supported: report, fail)"
+			)));
+		},
+	};
+	let unmanaged_fallback = match unmanaged_read_fallback.as_deref().map(str::trim) {
+		None | Some("" | "strict-utf8") => false,
+		Some("utf8-then-gbk") => true,
+		Some(other) => {
+			return Err(Error::from_reason(format!(
+				"unknown unmanagedReadFallback '{other}' (supported: utf8-then-gbk, strict-utf8)"
+			)));
+		},
+	};
+	let encoding = match (encoding_policy.as_ref(), encoding_policies.as_ref()) {
+		(None, None) => {
+			crate::encoding::SearchEncoding::single(None, report_undecodable, unmanaged_fallback)
+		},
+		(Some(single), None) => crate::encoding::SearchEncoding::single(
+			Some(crate::encoding::compile_policy(single.root.clone(), &single.json)?),
+			report_undecodable,
+			unmanaged_fallback,
+		),
+		(None, Some(list)) => crate::encoding::SearchEncoding::from_options(
+			list,
+			report_undecodable,
+			unmanaged_fallback,
+		)?,
+		(Some(_), Some(_)) => {
+			return Err(Error::from_reason(
+				"encodingPolicy and encodingPolicies are mutually exclusive",
+			));
+		},
+	};
+	let encoding = std::sync::Arc::new(encoding);
 	task::filesystem(env, "grep", ct, filesystem, move |filesystem, ct| {
 		let config = GrepConfig {
 			filesystem,

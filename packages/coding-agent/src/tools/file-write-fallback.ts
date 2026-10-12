@@ -132,6 +132,7 @@ import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { assertSourceEncoding, assertStableGbkBytes, encodeStrict } from "../encoding/index";
 import { assertProtectedConfigMutation } from "./protected-mode";
+import { invalidateConfigCachesAfterMutation } from "./fs-cache-invalidation";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { resolveSyscallTarget } from "./path-utils";
 
@@ -320,6 +321,7 @@ export async function deleteFileWithFallback(dst: string, file?: BunFile): Promi
 		} else {
 			await fs.unlink(dst);
 		}
+		invalidateConfigCachesAfterMutation(dst);
 	} catch (error) {
 		if (deleteFallbackHandlers.length === 0 || !isPermissionDeniedError(error)) throw error;
 		// A handler is more privileged than the unlink that just failed, so it is told
@@ -357,7 +359,10 @@ export async function deleteFileWithFallback(dst: string, file?: BunFile): Promi
 		// iterating it directly would skip whichever handler shifted into the hole.
 		for (const handler of Array.from(deleteFallbackHandlers)) {
 			try {
-				if (await handler({ dst: target, cause: error, confirmedFile, sessionId })) return;
+				if (await handler({ dst: target, cause: error, confirmedFile, sessionId })) {
+					invalidateConfigCachesAfterMutation(dst);
+					return;
+				}
 			} catch (handlerError) {
 				logger.warn("File delete fallback handler threw; trying next handler", {
 					dst: target,
@@ -444,6 +449,7 @@ export async function writeFileWithFallback(
 			} else {
 				await Bun.write(dst, payload);
 			}
+			invalidateConfigCachesAfterMutation(dst);
 			return;
 		} catch (error) {
 			if (fallbackHandlers.length === 0) throw error;
@@ -477,7 +483,10 @@ export async function writeFileWithFallback(
 					const sessionId = mutationSessionStorage.getStore();
 					for (const handler of Array.from(fallbackHandlers)) {
 						try {
-							if (await handler({ dst: target, content, encoding, cause: failure.cause, sessionId })) return;
+							if (await handler({ dst: target, content, encoding, cause: failure.cause, sessionId })) {
+								invalidateConfigCachesAfterMutation(dst);
+								return;
+							}
 						} catch (handlerError) {
 							logger.warn("File write fallback handler threw; trying next handler", {
 								dst: target,

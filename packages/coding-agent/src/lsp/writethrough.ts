@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { isEnoent, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
-import { resolveWriteEncoding, decodeStrict } from "../encoding/index";
+import { assertTextWriteEligibility, resolveWriteEncoding, decodeStrict } from "../encoding/index";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import {
 	beginPendingDiskWrite,
@@ -139,6 +139,13 @@ export async function writethroughNoop(
 	// Assuming `exists = true` here made creates land in the default
 	// (existing-file) encoding, silently contradicting the pre-write check.
 	const exists = await Bun.file(dst).exists();
+	assertTextWriteEligibility(dst, exists, () => {
+		try {
+			return fs.readFileSync(dst);
+		} catch {
+			return undefined;
+		}
+	});
 	await writeFileWithFallback(dst, content, file, resolveWriteEncoding(dst, exists));
 	return { finalContent: content };
 }
@@ -386,6 +393,13 @@ async function runLspWritethrough(
 		await writeFileWithFallback(dst, value, file, writeEncoding);
 		diskContent = value;
 	};
+	assertTextWriteEligibility(dst, changeType !== FileChangeType.Created, () => {
+		try {
+			return fs.readFileSync(dst);
+		} catch {
+			return undefined;
+		}
+	});
 	const writeEncoding = resolveWriteEncoding(dst, changeType !== FileChangeType.Created);
 	/** Commit {@link finalContent} unless those exact bytes are already on disk. */
 	const commitWrite = async () => {

@@ -420,26 +420,35 @@ struct PendingFileChange {
 struct PendingWrite {
 	absolute_path: PathBuf,
 	output:        String,
+	encoding:      pi_edit::encoding::TextEncoding,
+}
+
+struct CandidateSource {
+	text:           String,
+	utf8_ambiguous: bool,
+	diagnostic:     Option<crate::encoding::SourceEncodingDiagnostic>,
+	policy:         Option<std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 }
 
 /// Read a candidate's source: strict UTF-8 upstream, or strict GBK when the
 /// policy manages the path (byte offset in the error, never mojibake).
 fn read_candidate_source(
 	fs: &BlockingFs,
-	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
+	encoding: &crate::encoding::SearchEncoding,
 	path: &std::path::Path,
-) -> std::io::Result<(String, bool, Option<crate::encoding::SourceEncodingDiagnostic>)> {
+) -> std::io::Result<CandidateSource> {
 	let bytes = fs.read(path)?;
-	let policy = encoding.map(|p| p.as_ref());
-	crate::encoding::decode_source_strict(&bytes, path, policy, None)
-		.map(|decoded| {
-			(
-				decoded.text,
-				decoded.utf8_ambiguous,
-				decoded
-					.diagnostic
-					.into_notice(path.to_string_lossy().into_owned()),
-			)
+	let policy = encoding
+		.policy_for(path)
+		.map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+	crate::encoding::decode_source_strict(&bytes, path, policy.as_deref(), None)
+		.map(|decoded| CandidateSource {
+			text: decoded.text,
+			utf8_ambiguous: decoded.utf8_ambiguous,
+			diagnostic: decoded
+				.diagnostic
+				.into_notice(path.to_string_lossy().into_owned()),
+			policy,
 		})
 		.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
@@ -741,6 +750,7 @@ pub fn ast_grep<'env>(
 
 	let fs = ShellFilesystem::blocking(filesystem);
 	let encoding = crate::encoding::compile_policy_options(encoding_policy.as_ref())?;
+	let encoding = crate::encoding::SearchEncoding::single(encoding, false, false);
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
@@ -788,8 +798,8 @@ pub fn ast_grep<'env>(
 				continue;
 			};
 			let lang_key = language.canonical_name();
-			let (source, utf8_ambiguous, diagnostic) =
-				match read_candidate_source(&fs, encoding.as_ref(), &candidate.absolute_path) {
+			let CandidateSource { text: source, utf8_ambiguous, diagnostic, .. } =
+				match read_candidate_source(&fs, &encoding, &candidate.absolute_path) {
 					Ok(res) => res,
 					Err(err) => {
 						for compiled in &compiled_patterns {
@@ -1086,6 +1096,7 @@ fn ast_edit_blocking(
 	fail_on_parse_error: Option<bool>,
 	encoding: Option<&std::sync::Arc<pi_edit::encoding::CompiledEncodingPolicy>>,
 ) -> Result<AstReplaceResult> {
+	let encoding = crate::encoding::SearchEncoding::single(encoding.cloned(), false, false);
 	let rewrite_rules = normalize_rewrite_map(rewrites)?;
 	let strictness = resolve_strictness(strictness);
 	let dry_run = dry_run.unwrap_or(true);
@@ -1217,8 +1228,8 @@ fn ast_edit_blocking(
 			continue;
 		}
 
-		let (source, utf8_ambiguous, diagnostic) =
-			match read_candidate_source(fs, encoding, &candidate.absolute_path) {
+		let CandidateSource { text: source, utf8_ambiguous, diagnostic, policy: file_policy } =
+			match read_candidate_source(fs, &encoding, &candidate.absolute_path) {
 				Ok(res) => res,
 				Err(err) => {
 					if fail_on_parse_error {
@@ -1318,8 +1329,34 @@ fn ast_edit_blocking(
 		if !dry_run {
 			let output = apply_edits(&source, file_changes.iter().map(|entry| &entry.edit))?;
 			if output != source {
-				pending_writes
-					.push(PendingWrite { absolute_path: candidate.absolute_path.clone(), output });
+				let assignment = file_policy
+					.as_ref()
+					.and_then(|policy| policy.resolve_detailed(&candidate.absolute_path, true));
+				if assignment.is_some_and(|resolved| {
+					resolved.encoding == pi_edit::encoding::PolicyAssignment::Auto
+				}) {
+					let bytes = fs
+						.read(&candidate.absolute_path)
+						.map_err(|error| Error::from_reason(error.to_string()))?;
+					if std::str::from_utf8(&bytes).is_err()
+						|| pi_edit::encoding::dual_valid_utf8_with_gbk(&bytes)
+					{
+						return Err(Error::from_reason(format!(
+							"{}: auto encoding does not authorize writing ambiguous or non-UTF8 bytes; \
+							 add an explicit encoding override",
+							candidate.absolute_path.display()
+						)));
+					}
+				}
+				let encoding = file_policy
+					.as_ref()
+					.and_then(|policy| policy.resolve(&candidate.absolute_path, true))
+					.unwrap_or(pi_edit::encoding::TextEncoding::Utf8);
+				pending_writes.push(PendingWrite {
+					absolute_path: candidate.absolute_path.clone(),
+					output,
+					encoding,
+				});
 			}
 		}
 
@@ -1336,16 +1373,12 @@ fn ast_edit_blocking(
 			pi_edit::encoding::validate_source_encoding(
 				&write.absolute_path,
 				&write.output,
-				encoding
-					.as_ref()
-					.and_then(|policy| policy.resolve(&write.absolute_path, true))
-					.unwrap_or(pi_edit::encoding::TextEncoding::Utf8),
+				write.encoding,
 			)
 			.map_err(Error::from_reason)?;
-			if encoding.as_ref().is_some_and(|policy| {
-				policy.resolve(&write.absolute_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
-			}) && let Err((offset, ch)) =
-				pi_edit::encoding::encode_strict(&write.output, pi_edit::encoding::TextEncoding::Gbk)
+			if write.encoding == pi_edit::encoding::TextEncoding::Gbk
+				&& let Err((offset, ch)) =
+					pi_edit::encoding::encode_strict(&write.output, pi_edit::encoding::TextEncoding::Gbk)
 			{
 				return Err(Error::from_reason(format!(
 					"{}: character U+{:04X} ({}) at byte offset {offset} cannot be represented in GBK",
@@ -1357,9 +1390,7 @@ fn ast_edit_blocking(
 		}
 		for write in &pending_writes {
 			ct.heartbeat()?;
-			let gbk = encoding.as_ref().is_some_and(|policy| {
-				policy.resolve(&write.absolute_path, true) == Some(pi_edit::encoding::TextEncoding::Gbk)
-			});
+			let gbk = write.encoding == pi_edit::encoding::TextEncoding::Gbk;
 			let result = if gbk {
 				pi_edit::encoding::encode_strict(&write.output, pi_edit::encoding::TextEncoding::Gbk)
 					.map_err(|(_, ch)| {

@@ -11,13 +11,13 @@ import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
 import {
 	assertStableGbkBytes,
+	assertTextWriteEligibility,
 	discoverEncodingPolicy,
 	readTextWithPolicy,
 	formatAstEncodingNotes,
 	type AstEncodingDiagnostics,
-	type DiscoveredEncodingPolicy,
 	mergeAstDiagnosticEvidence,
-	resolveFileEncoding,
+	resolveTextDecision,
 } from "../encoding/index";
 import { assertProtectedConfigMutation } from "./protected-mode";
 
@@ -347,20 +347,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
-			const validateChanges = async (
-				preview: AstEditAggregatedResult,
-				context: ResolveContext,
-				policy: DiscoveredEncodingPolicy | undefined,
-			) => {
+			const validateChanges = async (preview: AstEditAggregatedResult, context: ResolveContext) => {
 				for (const change of preview.fileChanges) {
 					const target = await resultSnapshotPath(formatPath(change.path), this.session.cwd, context);
 					if (!target) continue; // Non-local URL backends retain their own write contract.
 					assertProtectedConfigMutation(target);
-					if (resolveFileEncoding(this.session.cwd, target, true, policy ?? null) === "gbk")
-						assertStableGbkBytes(await Bun.file(target).bytes(), target);
+					const bytes = await Bun.file(target).bytes();
+					assertTextWriteEligibility(target, true, () => bytes);
+					if (resolveTextDecision(target).assignment === "gbk") assertStableGbkBytes(bytes, target);
 				}
 			};
-			await validateChanges(result, resolveContext, discoveredEncoding);
+			await validateChanges(result, resolveContext);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
@@ -415,7 +412,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					try {
 						const bytes = await Bun.file(snapshotPath).bytes();
 						const fullText = normalizeToLF(
-							readTextWithPolicy(this.session.cwd, snapshotPath, bytes, true, discoveredEncoding ?? null).text,
+							readTextWithPolicy(
+								this.session.cwd,
+								snapshotPath,
+								bytes,
+								true,
+								resolveTextDecision(snapshotPath).discovered ?? null,
+							).text,
 						);
 						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
@@ -522,7 +525,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							encodingPolicy: applyEncodingPolicy,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
-						await validateChanges(freshPreview, applyContext, discoveredEncoding);
+						await validateChanges(freshPreview, applyContext);
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
@@ -559,8 +562,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								try {
 									const bytes = await Bun.file(appliedPath).bytes();
 									const fullText = normalizeToLF(
-										readTextWithPolicy(this.session.cwd, appliedPath, bytes, true, discoveredEncoding ?? null)
-											.text,
+										readTextWithPolicy(
+											this.session.cwd,
+											appliedPath,
+											bytes,
+											true,
+											resolveTextDecision(appliedPath).discovered ?? null,
+										).text,
 									);
 									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
 									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));

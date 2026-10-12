@@ -58,6 +58,101 @@ pub struct PathPolicy {
 	pub encoding:             Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>,
 }
 
+/// Read one directory's preferred policy. Only absence permits alias fallback;
+/// invalid, unreadable, and non-file entries are configuration errors.
+pub fn read_policy_directory(
+	directory: &Path,
+) -> Result<Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>, String> {
+	for namespace in [".ompg", ".omp"] {
+		let path = directory.join(namespace).join("encoding.json");
+		let content = match std::fs::read_to_string(&path) {
+			Ok(content) => content,
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+			Err(error) => return Err(format!("{}: {error}", path.display())),
+		};
+		let spec = serde_json::from_str::<crate::encoding::EncodingSpec>(&content)
+			.map_err(|error| format!("{}: invalid encoding policy: {error}", path.display()))?;
+		let compiled =
+			crate::encoding::CompiledEncodingPolicy::compile(directory.to_path_buf(), &spec)
+				.map_err(|error| format!("{}: {error}", path.display()))?;
+		return Ok(Some(std::sync::Arc::new(compiled)));
+	}
+	Ok(None)
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+	let left = strip_windows_verbatim_path(left.to_path_buf());
+	let right = strip_windows_verbatim_path(right.to_path_buf());
+	if cfg!(windows) {
+		left
+			.to_string_lossy()
+			.eq_ignore_ascii_case(&right.to_string_lossy())
+	} else {
+		left == right
+	}
+}
+
+/// Nearest target policy, including nested projects inside a captured root.
+///
+/// A captured policy pins that root for the call; child directories still
+/// resolve independently. Search callers may memoize directory probes.
+pub fn discover_policy_upward_with(
+	path: &Path,
+	home_dir: &Path,
+	captured: Option<&std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>,
+	mut probe: impl FnMut(
+		&Path,
+	) -> Result<
+		Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>,
+		String,
+	>,
+) -> Result<Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>, String> {
+	// Provider URLs are opaque filesystem keys, not host directories. Their
+	// caller-supplied policy is the only applicable context.
+	if !path.is_absolute() {
+		return Ok(captured.cloned());
+	}
+	let Some(mut current) = path.parent() else {
+		return Ok(None);
+	};
+	loop {
+		if let Some(policy) = captured
+			&& same_directory(current, policy.root())
+		{
+			return Ok(Some(std::sync::Arc::clone(policy)));
+		}
+		if !home_dir.as_os_str().is_empty() && same_directory(current, home_dir) {
+			return Ok(None);
+		}
+		if let Some(policy) = probe(current)? {
+			return Ok(Some(policy));
+		}
+		match std::fs::metadata(current.join(".git")) {
+			Ok(_) => return Ok(None),
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+			Err(error) => {
+				return Err(format!(
+					"{}: cannot inspect repository boundary: {error}",
+					current.display()
+				));
+			},
+		}
+		match current.parent() {
+			Some(parent) if parent != current => current = parent,
+			_ => return Ok(None),
+		}
+	}
+}
+
+/// Upward discovery shared by edit targets and their snapshot store.
+pub fn discover_policy_upward(
+	path: &Path,
+	home_dir: &Path,
+	captured: Option<&std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>,
+) -> Result<Option<std::sync::Arc<crate::encoding::CompiledEncodingPolicy>>, String> {
+	discover_policy_upward_with(path, home_dir, captured, read_policy_directory)
+}
+
 impl PathPolicy {
 	/// Resolve the charset `absolute` persists with; `None` means unmanaged
 	/// (upstream behavior). `exists` picks the existing-file rule (include
@@ -68,11 +163,10 @@ impl PathPolicy {
 		&self,
 		absolute: &Path,
 		exists: bool,
-	) -> Option<crate::encoding::TextEncoding> {
-		self
-			.encoding
-			.as_ref()
-			.and_then(|policy| policy.resolve(absolute, exists))
+	) -> EditResult<Option<crate::encoding::TextEncoding>> {
+		let policy = discover_policy_upward(absolute, &self.home_dir, self.encoding.as_ref())
+			.map_err(EditError::apply)?;
+		Ok(policy.and_then(|policy| policy.resolve(absolute, exists)))
 	}
 
 	/// The internal URL `authored` names: the hashline-header-unwrapped

@@ -11,7 +11,11 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
-import { discoverEncodingPolicy } from "../encoding/index";
+import {
+	cfgTextEncodingInvalidSearchFile,
+	cfgTextEncodingReadFallback,
+	discoverEncodingPolicy,
+} from "../encoding/index";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
@@ -502,10 +506,27 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				context: resolveContext,
 				tier: resolveToolTier(this, params),
 			});
-			const encodingPolicyOption = (() => {
-				const discovered = discoverEncodingPolicy(this.session.cwd);
-				return discovered ? { root: discovered.root, json: discovered.json } : undefined;
+			// Encoding policies: one entry per DISTINCT project root among the
+			// search targets (each target's own tree — never blanket-inherited
+			// from the session cwd). Native resolves per file: the nearest
+			// root wins, and files no policy manages follow the global
+			// read-fallback setting.
+			const encodingPolicies = (() => {
+				const roots = new Map<string, { root: string; json: string }>();
+				const searchRoots = [
+					...pathSpecs.map(spec => path.resolve(this.session.cwd, spec.clean)),
+					path.resolve(this.session.cwd),
+				];
+				for (const root of searchRoots) {
+					const discovered = discoverEncodingPolicy(root);
+					if (discovered && !roots.has(discovered.root)) {
+						roots.set(discovered.root, { root: discovered.root, json: discovered.json });
+					}
+				}
+				return roots.size > 0 ? [...roots.values()] : undefined;
 			})();
+			const onUndecodable = cfgTextEncodingInvalidSearchFile.get(this.session.settings);
+			const unmanagedReadFallback = cfgTextEncodingReadFallback.get(this.session.settings);
 			const filesystem = urlFilesystem.shellFilesystem();
 			const materializedExternalPaths = new Map<string, string>();
 			const materializeExternalUrlForSearch = async (rawPath: string) => {
@@ -641,6 +662,23 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						if (!ambiguousEncodingFiles.includes(display)) ambiguousEncodingFiles.push(display);
 					}
 				};
+				let searchComplete = true;
+				let undecodableFileCount = 0;
+				const undecodableFiles: Array<{ path: string; reason: string }> = [];
+				const collectUndecodableFiles = (
+					basePath: string,
+					files: Array<{ path: string; reason: string }> | undefined,
+				): void => {
+					for (const entry of files ?? []) {
+						const display = formatPathRelativeToCwd(
+							resolveSearchResultPath(basePath, entry.path),
+							this.session.cwd,
+						);
+						if (!undecodableFiles.some(f => f.path === display)) {
+							undecodableFiles.push({ path: display, reason: entry.reason });
+						}
+					}
+				};
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -677,12 +715,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
-									encodingPolicy: encodingPolicyOption,
+									encodingPolicies,
+									onUndecodable,
+									unmanagedReadFallback,
 								},
 								undefined,
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							collectAmbiguousFiles(target.basePath, targetResult.ambiguousEncodingFiles);
+							if (targetResult.searchComplete === false) searchComplete = false;
+							undecodableFileCount += targetResult.undecodableFileCount ?? 0;
+							collectUndecodableFiles(target.basePath, targetResult.undecodableFiles);
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
@@ -706,6 +749,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							filesWithMatches: new Set(matches.map(match => match.path)).size,
 							filesSearched: exactFilePaths ? exactFilePaths.length : filesSearched,
 							limitReached,
+							searchComplete,
+							undecodableFileCount,
+							undecodableFiles,
 						};
 					} else {
 						result = await grep(
@@ -727,12 +773,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,
-								encodingPolicy: encodingPolicyOption,
+								encodingPolicies,
+								onUndecodable,
+								unmanagedReadFallback,
 							},
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
 						collectAmbiguousFiles(searchPath, result.ambiguousEncodingFiles);
+						if (result.searchComplete === false) searchComplete = false;
+						undecodableFileCount = result.undecodableFileCount ?? 0;
+						collectUndecodableFiles(searchPath, result.undecodableFiles);
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
@@ -909,8 +960,22 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					ambiguousEncodingFiles.length > 0
 						? `GBK policy decoded ${ambiguousEncodingFiles.length} searched file(s) whose bytes are also valid UTF-8 — the two readings differ; add an explicit override (glob + "encoding": "utf8") in this project's .omp/encoding.json for any that is actually UTF-8: ${ambiguousEncodingFiles.join(", ")}`
 						: undefined;
+				const undecodableNote =
+					undecodableFileCount > 0
+						? (() => {
+								const samples = undecodableFiles
+									.slice(0, 5)
+									.map(f => `${f.path} (${f.reason})`)
+									.join(", ");
+								const more =
+									undecodableFileCount > undecodableFiles.length || undecodableFiles.length > 5
+										? ` (...and ${undecodableFileCount - Math.min(undecodableFiles.length, 5)} more)`
+										: "";
+								return `Skipped ${undecodableFileCount} undecodable file(s) in report mode: ${samples}${more}. Configure an encoding policy (.ompg/encoding.json via \`ompg encoding init\`) or fix their encoding.`;
+							})()
+						: undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, encodingAmbiguityNote]
+					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, encodingAmbiguityNote, undecodableNote]
 						.filter((s): s is string => Boolean(s))
 						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {
@@ -923,11 +988,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						files: [],
 						truncated: false,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
+						searchComplete,
+						undecodableFileCount: undecodableFileCount > 0 ? undecodableFileCount : undefined,
 					};
 					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
 					const noMatchText = skipPastEnd
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
-						: "No matches found";
+						: undecodableFileCount > 0
+							? `No matches found in searched files (${undecodableFileCount} file(s) not searched due to encoding errors)`
+							: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.
@@ -1075,6 +1144,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					displayContent: displayText,
 					displayTargets,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
+					searchComplete,
+					undecodableFileCount: undecodableFileCount > 0 ? undecodableFileCount : undefined,
 				};
 				if (truncation.truncated) details.truncation = truncation;
 				if (linesTruncated) details.linesTruncated = true;

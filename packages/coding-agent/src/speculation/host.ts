@@ -16,7 +16,7 @@ import type {
 import {
 	BINARY_SNIFF_BYTES,
 	IMAGE_METADATA_HEADER_BYTES,
-	isProbablyBinaryHeader,
+	isStructuralBinaryHeader,
 	parseImageMetadata,
 } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -91,7 +91,7 @@ function isNonTextContent(bytes: Buffer): boolean {
 	if (parseImageMetadata(bytes.subarray(0, IMAGE_METADATA_HEADER_BYTES))) return true;
 	const header = bytes.subarray(0, BINARY_SNIFF_BYTES);
 	return (
-		isProbablyBinaryHeader(header) ||
+		isStructuralBinaryHeader(header) ||
 		header.subarray(0, 5).toString("ascii") === "%PDF-" ||
 		(header.length >= 16 && header.subarray(0, 15).toString("ascii") === "SQLite format 3" && header[15] === 0)
 	);

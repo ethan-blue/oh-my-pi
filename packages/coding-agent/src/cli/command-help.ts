@@ -171,3 +171,7 @@ export const usageHelp = {
 export const worktreeHelp = {
 	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;
+
+export const encodingHelp = {
+	description: "Inspect project text encoding policies and initialize .ompg/encoding.json",
+} satisfies CommandMetadata;

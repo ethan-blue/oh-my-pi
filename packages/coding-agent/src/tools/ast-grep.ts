@@ -110,6 +110,10 @@ async function runMultiTargetAstGrep(
 	let filesSearched = 0;
 	let limitReached = false;
 	for (const target of targets) {
+		const targetPolicy = (() => {
+			const discovered = discoverEncodingPolicy(target.basePath);
+			return discovered ? { root: discovered.root, json: discovered.json } : options.encodingPolicy;
+		})();
 		const targetResult = await astGrep({
 			patterns: options.patterns,
 			lang: options.lang,
@@ -120,7 +124,7 @@ async function runMultiTargetAstGrep(
 			includeMeta: true,
 			signal: options.signal,
 			filesystem: options.filesystem,
-			encodingPolicy: options.encodingPolicy,
+			encodingPolicy: targetPolicy,
 		});
 		totalMatches += targetResult.totalMatches;
 		filesWithMatches += targetResult.filesWithMatches;
@@ -262,7 +266,8 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
-			const discoveredEncoding = discoverEncodingPolicy(this.session.cwd);
+			const discoveredEncoding =
+				discoverEncodingPolicy(resolvedSearchPath) ?? discoverEncodingPolicy(this.session.cwd);
 			const encodingPolicyOption = discoveredEncoding
 				? { root: discoveredEncoding.root, json: discoveredEncoding.json }
 				: undefined;

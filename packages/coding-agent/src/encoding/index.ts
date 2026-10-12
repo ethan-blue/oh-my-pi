@@ -18,8 +18,12 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import {
+	findProjectConfigUpward,
+	invalidateProjectConfigCaches,
+	type ProjectConfigNamespace,
+} from "@oh-my-pi/pi-utils";
 import {
 	EncodingPolicy,
 	type SourceEncodingDiagnostic,
@@ -29,7 +33,9 @@ import {
 	encodingValidateSource,
 } from "@oh-my-pi/pi-natives";
 
-export const ENCODING_CONFIG_RELATIVE = path.join(".omp", "encoding.json");
+export const ENCODING_CONFIG_FILE = "encoding.json";
+/** Legacy fixed-`.omp` relative path; kept for diagnostics and older callers. */
+export const ENCODING_CONFIG_RELATIVE = path.join(".omp", ENCODING_CONFIG_FILE);
 
 /** Encodings this fork implements; anything else is rejected up front. */
 export type ManagedEncoding = "utf8" | "gbk";
@@ -37,12 +43,38 @@ export type ManagedEncoding = "utf8" | "gbk";
 export interface DiscoveredEncodingPolicy {
 	/** Compiled native policy; `resolve()` answers per-path questions. */
 	policy: EncodingPolicy;
-	/** Absolute project root — the directory whose `.omp/encoding.json` this is. */
+	/** Absolute project root — the directory whose config namespace this is. */
 	root: string;
-	/** `mtimeMs` of the config file, for cheap cache invalidation. */
+	/** Namespace directory that holds the selected file (".ompg" or ".omp"). */
+	namespace: ProjectConfigNamespace;
+	/** Absolute path of the selected encoding.json. */
+	configPath: string;
+	/** `mtimeMs` of the config file. */
 	mtimeMs: number;
 	/** Raw file contents (passed to edit sessions so Rust compiles the same rules). */
 	json: string;
+}
+
+/**
+ * Typed encoding-configuration failure: a config file that exists but cannot
+ * be read (permission) or does not compile (invalid schema/globs/encodings).
+ * These are configuration errors the user must fix — never silently treated
+ * as "no policy" and never silently routed to an older config file.
+ */
+export class EncodingConfigError extends Error {
+	constructor(
+		public readonly configPath: string,
+		public readonly kind: "permission" | "invalid",
+		cause?: unknown,
+	) {
+		super(
+			kind === "permission"
+				? `${configPath}: permission denied while reading the encoding policy; fix the file's permissions — this is not treated as "no policy"`
+				: `${configPath}: invalid encoding policy: ${cause instanceof Error ? cause.message : String(cause)}`,
+		);
+		this.name = "EncodingConfigError";
+		this.cause = cause;
+	}
 }
 
 const policyCache = new Map<string, DiscoveredEncodingPolicy>();
@@ -55,19 +87,25 @@ const policyCache = new Map<string, DiscoveredEncodingPolicy>();
 const NEGATIVE_CACHE_TTL_MS = 1000;
 const negativeCache = new Map<string, number>();
 
+/** Drop every cached policy/discovery result (after a config write). */
+export function invalidateEncodingCaches(): void {
+	policyCache.clear();
+	negativeCache.clear();
+	invalidateProjectConfigCaches();
+}
+
 /**
- * Find the nearest `.omp/encoding.json` at or above `cwd` and return its
- * compiled policy. The walk stops at the filesystem root and never consults
- * the user's home directory itself (a home-level policy must not leak into
- * every project under it).
+ * Find the nearest `encoding.json` at or above `cwd` — `.ompg` preferred
+ * over `.omp` at the same root, whole-file, never merged — and return its
+ * compiled policy.
  *
- * A cached compiled policy is reused only while the config file's mtime AND
- * CONTENT both match — mtime alone cannot prove the config unchanged (a
- * rewrite inside the filesystem's timestamp granularity, or a same-mtime
- * overwrite, would otherwise keep serving the old rules). The small config
- * read happens on every discovery; the expensive glob compilation only when
- * the policy actually changed. Within one tool operation the returned object
- * is stable, so repeated resolutions reuse the same verified policy.
+ * Boundaries (docs/gbk-handoff/31 §2.3): the walk never reads a config at
+ * the user's home directory or at the fork's user-data root; probing stops
+ * after the nearest `.git` root has been checked. An entry that exists but
+ * cannot be inspected raises {@link EncodingConfigError} — permission is not
+ * absence. A cached compiled policy is reused only while the file's CONTENT
+ * matches (mtime alone cannot prove the config unchanged); the expensive
+ * glob compilation happens only when the policy actually changed.
  */
 export function discoverEncodingPolicy(cwd: string): DiscoveredEncodingPolicy | undefined {
 	const start = path.resolve(cwd);
@@ -75,36 +113,42 @@ export function discoverEncodingPolicy(cwd: string): DiscoveredEncodingPolicy | 
 	if (negativeAt !== undefined && Date.now() - negativeAt < NEGATIVE_CACHE_TTL_MS) {
 		return undefined;
 	}
-	const home = os.homedir();
-	let dir = start;
-	for (;;) {
-		const configPath = path.join(dir, ENCODING_CONFIG_RELATIVE);
-		let stat: fs.Stats | undefined;
-		try {
-			stat = fs.statSync(configPath);
-		} catch {
-			// not present here — keep walking
-		}
-		if (stat?.isFile()) {
-			const json = fs.readFileSync(configPath, "utf8");
-			const cached = policyCache.get(dir);
-			if (cached && cached.mtimeMs === stat.mtimeMs && cached.json === json) return cached;
-			const policy = new EncodingPolicy(dir, json);
-			const discovered: DiscoveredEncodingPolicy = {
-				policy,
-				root: dir,
-				mtimeMs: stat.mtimeMs,
-				json,
-			};
-			policyCache.set(dir, discovered);
-			return discovered;
-		}
-		if (dir === home || path.dirname(dir) === dir) {
-			negativeCache.set(start, Date.now());
-			return undefined;
-		}
-		dir = path.dirname(dir);
+	const lookup = findProjectConfigUpward(start, ENCODING_CONFIG_FILE);
+	if (!lookup) {
+		negativeCache.set(start, Date.now());
+		return undefined;
 	}
+	if (lookup.status !== "found") {
+		negativeCache.delete(start);
+		throw new EncodingConfigError(lookup.configPath, lookup.status, lookup.cause);
+	}
+	let json: string;
+	try {
+		json = fs.readFileSync(lookup.configPath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EACCES") {
+			throw new EncodingConfigError(lookup.configPath, "permission", error);
+		}
+		throw error;
+	}
+	const cached = policyCache.get(lookup.configPath);
+	if (cached && cached.json === json && cached.namespace === lookup.namespace) return cached;
+	let policy: EncodingPolicy;
+	try {
+		policy = new EncodingPolicy(lookup.root, json);
+	} catch (error) {
+		throw new EncodingConfigError(lookup.configPath, "invalid", error);
+	}
+	const discovered: DiscoveredEncodingPolicy = {
+		policy,
+		root: lookup.root,
+		namespace: lookup.namespace,
+		configPath: lookup.configPath,
+		mtimeMs: 0,
+		json,
+	};
+	policyCache.set(lookup.configPath, discovered);
+	return discovered;
 }
 
 /**
@@ -361,6 +405,142 @@ export function assertStableGbkBytes(bytes: Uint8Array, filePath: string): void 
 	}
 }
 
+/** How a text read may decode: fixed codec, or the read-only fallback order. */
+export type TextDecodeMode = "utf8" | "gbk" | "utf8-then-gbk";
+
+/** Per-target read assignment resolved from the file's own project tree. */
+export interface TextReadDecision {
+	/** Fixed policy encoding, `auto` (schema 2 read branch), or `unmanaged`. */
+	assignment: "utf8" | "gbk" | "auto" | "unmanaged";
+	discovered?: DiscoveredEncodingPolicy;
+	fromOverride?: boolean;
+}
+
+/**
+ * Resolve the read assignment for one absolute path from the TARGET's own
+ * directory — never from the session cwd, so an external project keeps its
+ * own policy and a session-level GBK default never blankets external trees.
+ * `auto` and `unmanaged` files decode by the caller's fallback setting.
+ */
+export function resolveTextDecision(absolutePath: string): TextReadDecision {
+	const discovered = discoverEncodingPolicy(path.dirname(path.resolve(absolutePath)));
+	if (!discovered) return { assignment: "unmanaged" };
+	const resolved = discovered.policy.resolveDetailed(absolutePath, true);
+	if (!resolved) return { assignment: "unmanaged" };
+	return {
+		assignment: resolved.encoding as TextReadDecision["assignment"],
+		discovered,
+		fromOverride: resolved.fromOverride,
+	};
+}
+
+/**
+ * Decode `bytes` per `mode`: fixed codecs stay strict; `utf8-then-gbk` tries
+ * strict UTF-8 first and only then strict GBK. Throws a combined, path-annotated
+ * error when both orders fail — never substitutes.
+ */
+export function decodeTextByMode(bytes: Uint8Array, mode: TextDecodeMode, absolutePath: string): string {
+	if (mode === "gbk") {
+		if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+			throw new Error(
+				`${absolutePath}: policy conflict — the file carries a UTF-8 BOM but the encoding policy assigns GBK; add an override with encoding "utf8" for this path`,
+			);
+		}
+		return decodeStrict(bytes, "gbk");
+	}
+	if (mode === "utf8-then-gbk") {
+		try {
+			return decodeStrict(bytes, "utf8");
+		} catch (utf8Error) {
+			try {
+				return decodeStrict(bytes, "gbk");
+			} catch (gbkError) {
+				throw new Error(
+					`${absolutePath}: neither strict UTF-8 (${String(utf8Error)}) nor strict GBK (${String(gbkError)}) decodes this file. Configure this project's encoding policy (.ompg/encoding.json via \`ompg encoding init\`) or fix the file's encoding; do not rewrite it to recover a read.`,
+				);
+			}
+		}
+	}
+	return decodeStrict(bytes, mode);
+}
+
+/**
+ * The visible notice when a file with no fixed policy assignment was read
+ * through the automatic GBK fallback: `undefined` when the bytes are valid
+ * UTF-8 (no fallback happened) or not valid GBK either (not fallback-readable).
+ * The fallback is READ-ONLY — it never authorizes GBK writes.
+ */
+export function unmanagedGbkFallbackNotice(absolutePath: string, bytes: Uint8Array): string | undefined {
+	try {
+		decodeStrict(bytes, "utf8");
+		return undefined;
+	} catch {
+		// fall through to the GBK probe
+	}
+	try {
+		decodeStrict(bytes, "gbk");
+	} catch {
+		return undefined;
+	}
+	return `${absolutePath}: not valid UTF-8; decoded as GBK through the read-only automatic fallback (no encoding policy covers this path). This inference does NOT authorize GBK writes — create an explicit project policy (ompg encoding init --profile gbk-source) before editing this file.`;
+}
+
+/**
+ * Write eligibility for a text target: an EXISTING file whose bytes are
+ * undecodable as UTF-8 (i.e. would have been read via the GBK fallback) must
+ * not be rewritten by the UTF-8 write path — that would silently corrupt it.
+ * Refuse with the explicit-policy guidance instead. New files and valid
+ * UTF-8 files stay writable; policy-managed files follow their own rules.
+ */
+export function assertTextWriteEligibility(
+	absolutePath: string,
+	exists: boolean,
+	probeBytes?: () => Uint8Array | undefined,
+): void {
+	if (!exists) return;
+	const decision = resolveTextDecision(absolutePath);
+	if (decision.fromOverride || decision.assignment === "gbk" || decision.assignment === "utf8") return;
+
+	let bytes: Uint8Array | undefined;
+	try {
+		bytes = probeBytes?.();
+	} catch (err) {
+		throw new Error(
+			`${absolutePath}: failed to read file bytes to verify encoding write eligibility: ${err instanceof Error ? err.message : String(err)}. Refusing to write without verifying file encoding.`,
+		);
+	}
+	if (!bytes) {
+		throw new Error(
+			`${absolutePath}: could not probe file bytes for encoding write eligibility; refusing to overwrite existing file without an explicit encoding policy.`,
+		);
+	}
+
+	if (decision.assignment === "auto") {
+		let dualValid = false;
+		if (encodingUtf8AmbiguousWithGbk(bytes)) {
+			try {
+				decodeStrict(bytes, "gbk");
+				dualValid = true;
+			} catch {
+				// UTF-8 alone is unambiguous: the GBK reading must also be legal.
+			}
+		}
+		if (dualValid) {
+			throw new Error(
+				`${absolutePath}: file contains non-ASCII text that is ambiguous under schemaVersion 2 'auto' policy (valid in both UTF-8 and GBK). Add an explicit override rule ("encoding": "utf8" or "gbk") in .ompg/encoding.json before editing this file.`,
+			);
+		}
+	}
+
+	try {
+		decodeStrict(bytes, "utf8");
+	} catch {
+		throw new Error(
+			`${absolutePath}: this file is not valid UTF-8 and has no explicit encoding policy, so writing it as UTF-8 would corrupt it. Create a project policy first (ompg encoding init --profile gbk-source, or add an include rule + override in .ompg/encoding.json), then edit through the native tools.`,
+		);
+	}
+}
+
 /**
  * Read a file's text through the encoding policy: managed GBK files are
  * strictly decoded, everything else keeps upstream UTF-8 semantics. A leading
@@ -422,3 +602,4 @@ export function encodeForWrite(
 }
 
 export type { EncodingPolicy };
+export * from "./settings";

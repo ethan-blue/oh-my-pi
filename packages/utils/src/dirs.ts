@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
+import { findProjectConfigUpward } from "./project-config";
 
 /** App name — this fork's distribution/command name (coexists with the original `omp`). */
 export const APP_NAME: string = "ompg";
@@ -1171,7 +1172,9 @@ export function getMCPConfigPath(scope: "user" | "project", cwd: string = getPro
 	if (scope === "user") {
 		return path.join(getAgentDir(), "mcp.json");
 	}
-	return path.join(getProjectAgentDir(cwd), "mcp.json");
+	const lookup = findProjectConfigUpward(cwd, "mcp.json");
+	if (lookup && lookup.status !== "found") throw lookup.cause;
+	return lookup?.configPath ?? path.join(getProjectAgentDir(cwd), "mcp.json");
 }
 
 /** Get the SSH config file path. */

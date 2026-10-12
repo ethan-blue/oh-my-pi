@@ -61,6 +61,10 @@ export interface GrepToolDetails {
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
 	missingPaths?: string[];
+	/** Whether every targeted file was decodable and searched. `false` in report mode when undecodable files were skipped. */
+	searchComplete?: boolean;
+	/** Count of files skipped because they could not be decoded. */
+	undecodableFileCount?: number;
 }
 
 // =============================================================================
@@ -441,6 +445,9 @@ export const grepToolRenderer = {
 		const textContent = details?.displayContent ?? resultText(result);
 		const missing = details?.missingPaths ?? [];
 		const missingNote = missing.length > 0 ? `skipped missing: ${missing.join(", ")}` : undefined;
+		const undecodableCount = details?.undecodableFileCount ?? 0;
+		const undecodableNote =
+			undecodableCount > 0 ? `skipped undecodable: ${formatCount("file", undecodableCount)}` : undefined;
 		const scope = details?.scopePath ? `in ${details.scopePath}` : undefined;
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
 		const matchCount = details?.matchCount ?? 0;
@@ -448,9 +455,10 @@ export const grepToolRenderer = {
 			(!hasDetailedData && (!textContent || textContent === "No matches found")) ||
 			(hasDetailedData && matchCount === 0)
 		) {
-			const foot = footnoteText(compact([missingNote]));
+			const foot = footnoteText(compact([missingNote, undecodableNote]));
+			const zeroLabel = undecodableCount > 0 ? "0 matches in searched files" : "0 matches";
 			return {
-				tool: grepNativeHead(args, compact(["0 matches", scope])),
+				tool: grepNativeHead(args, compact([zeroLabel, scope])),
 				tone: "warning",
 				inline: true,
 				body: foot ? [foot] : undefined,
@@ -466,11 +474,14 @@ export const grepToolRenderer = {
 		const head = grepNativeHead(args, compact([counts, scope]));
 		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
 		const foot = footnoteText(
-			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote]),
+			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote, undecodableNote]),
 			details?.meta,
 		);
+		const badges: Array<{ text: string; tone?: "warning" | "error" | "info" }> = [];
+		if (truncated) badges.push({ text: "truncated", tone: "warning" });
+		if (details?.searchComplete === false) badges.push({ text: "partial", tone: "warning" });
 		return {
-			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
+			tool: badges.length > 0 ? { ...head, badges } : head,
 			inline: true,
 			body: compact<NativeChild>([
 				...describeGroupedOutput(textContent.split("\n"), {

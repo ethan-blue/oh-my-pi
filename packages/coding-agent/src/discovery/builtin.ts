@@ -4,7 +4,16 @@
  * Primary provider for OMP native configs. Supports all capabilities.
  */
 import * as path from "node:path";
-import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import {
+	findProjectConfigUpward,
+	getAgentDir,
+	logger,
+	normalizePathForComparison,
+	parseFrontmatter,
+	tryParseJson,
+	PROJECT_CONFIG_NAMESPACES,
+	MAIN_CONFIG_FILENAMES,
+} from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
@@ -32,7 +41,6 @@ import {
 	getExtensionNameFromPath,
 	loadFilesFromDir,
 	parseRequestIdFormat,
-	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -40,8 +48,6 @@ const PROVIDER_ID = "native";
 const DISPLAY_NAME = "OMP";
 const DESCRIPTION = "Native OMP configuration from ~/.ompg and .omp/";
 const PRIORITY = 100;
-
-const PATHS = SOURCE_PATHS.native;
 
 async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 	let dir = path.join(...seg);
@@ -58,11 +64,13 @@ async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; level: "user" | "project" }>> {
 	const result: Array<{ dir: string; level: "user" | "project" }> = [];
 
-	const projectDir =
-		normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home)
-			? null
-			: await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
-	if (projectDir) result.push({ dir: projectDir, level: "project" });
+	const isHome = normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home);
+	if (!isHome) {
+		const ompgDir = await ifNonEmptyDir(ctx.cwd, ".ompg");
+		if (ompgDir) result.push({ dir: ompgDir, level: "project" });
+		const ompDir = await ifNonEmptyDir(ctx.cwd, ".omp");
+		if (ompDir) result.push({ dir: ompDir, level: "project" });
+	}
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.ompg/profiles/<name>/agent), like sessions and MCP.
 	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
@@ -97,14 +105,18 @@ export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ di
  * Windows, scratch folders) must not load its SYSTEM.md/RULES.md/AGENTS.md as
  * project config — that also bypasses an overridden agent dir or profile.
  */
-async function findNearestProjectConfigDir(ctx: LoadContext): Promise<{ dir: string; depth: number } | null> {
-	const home = normalizePathForComparison(ctx.home);
-	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
-		if (normalizePathForComparison(ancestor.dir) === home) continue;
-		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
-		if (configDir) return { dir: configDir, depth: ancestor.depth };
-	}
-	return null;
+async function findNearestProjectConfigDir(
+	ctx: LoadContext,
+	file: string,
+): Promise<{ dir: string; depth: number } | null> {
+	const lookup = findProjectConfigUpward(ctx.cwd, file, { home: ctx.home, stopAt: ctx.repoRoot ?? ctx.home });
+	if (!lookup) return null;
+	if (lookup.status !== "found") throw lookup.cause;
+	const depth =
+		getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).find(
+			entry => normalizePathForComparison(entry.dir) === normalizePathForComparison(lookup.root),
+		)?.depth ?? 0;
+	return { dir: path.dirname(lookup.configPath), depth };
 }
 
 // MCP
@@ -220,9 +232,15 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
 	const userAgentDir = getAgentDir();
+	const projectMcpDirs = await Promise.all(
+		["mcp.json", ".mcp.json"].map(file => findNearestProjectConfigDir(ctx, file)),
+	);
 	const paths = [
-		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
-		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },
+		...projectMcpDirs.flatMap((entry, index) =>
+			entry
+				? [{ path: path.join(entry.dir, index === 0 ? "mcp.json" : ".mcp.json"), level: "project" as const }]
+				: [],
+		),
 		{ path: path.join(userAgentDir, "mcp.json"), level: "user" as const },
 		{ path: path.join(userAgentDir, ".mcp.json"), level: "user" as const },
 	];
@@ -272,10 +290,12 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 
 	// Project entries first: dedupe is first-wins, so a project literal or
 	// template claims its key before a same-scope user file can survive.
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
-	if (nearestProjectConfigDir) {
-		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
-		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
+	for (const [file, kind] of [
+		["SYSTEM.md", "text"],
+		["SYSTEM_TEMPLATE.md", "template"],
+	] as const) {
+		const selected = await findNearestProjectConfigDir(ctx, file);
+		if (selected) await load(path.join(selected.dir, file), "project", kind);
 	}
 	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
 	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
@@ -299,13 +319,15 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(
 		({ dir }) => normalizePathForComparison(dir) !== home,
 	);
-	const projectScans = ancestors.map(({ dir }) =>
-		scanSkillsFromDir(ctx, {
-			dir: path.join(dir, PATHS.projectDir, "skills"),
-			providerId: PROVIDER_ID,
-			level: "project",
-			requireDescription: true,
-		}),
+	const projectScans = ancestors.flatMap(({ dir }) =>
+		PROJECT_CONFIG_NAMESPACES.map(namespace =>
+			scanSkillsFromDir(ctx, {
+				dir: path.join(dir, namespace, "skills"),
+				providerId: PROVIDER_ID,
+				level: "project",
+				requireDescription: true,
+			}),
+		),
 	);
 
 	// User-level scan from ~/.ompg/agent/skills/
@@ -411,7 +433,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx, "RULES.md");
 	if (nearestProjectConfigDir) {
 		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
 		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
@@ -878,10 +900,22 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 			return null;
 		}
 	};
+	const selectedProjectFiles = new Map<string, string>();
+	for (const file of ["settings.json", "config.yml"]) {
+		const lookup = findProjectConfigUpward(ctx.cwd, file === "config.yml" ? MAIN_CONFIG_FILENAMES : file, {
+			home: ctx.home,
+			stopAt: ctx.cwd,
+		});
+		if (lookup && lookup.status !== "found") throw lookup.cause;
+		if (lookup) selectedProjectFiles.set(file, lookup.configPath);
+	}
 
 	for (const { dir, level } of await getConfigDirs(ctx)) {
 		const settingsPath = path.join(dir, "settings.json");
-		const settingsContent = await readFile(settingsPath);
+		const settingsContent =
+			level === "user" || selectedProjectFiles.get("settings.json") === settingsPath
+				? await readFile(settingsPath)
+				: null;
 		if (settingsContent) {
 			const data = tryParseJson<Record<string, unknown>>(settingsContent);
 			if (data) {
@@ -896,8 +930,10 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 			}
 		}
 
-		const configPath = path.join(dir, "config.yml");
-		const configContent = await readFile(configPath);
+		const configPath = level === "project" ? selectedProjectFiles.get("config.yml") : path.join(dir, "config.yml");
+		if (!configPath || (level === "project" && path.dirname(configPath) !== dir)) continue;
+		const configContent =
+			level === "user" || selectedProjectFiles.get("config.yml") === configPath ? await readFile(configPath) : null;
 		if (!configContent) continue;
 
 		const data = parseYamlSettings(configContent, configPath);
@@ -938,7 +974,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx, "AGENTS.md");
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
 		const projectContent = await readFile(projectPath);

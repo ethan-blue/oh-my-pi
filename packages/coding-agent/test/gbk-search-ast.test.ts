@@ -113,6 +113,9 @@ describe("GBK search and AST", () => {
 	});
 
 	it("grep without a policy reports invalid encoding instead of a false zero-match result", async () => {
+		// Native searches now discover on-disk policy without an option; this
+		// case must actually have no policy, rather than merely omit the option.
+		await fs.unlink(path.join(tmpDir, ".omp", "encoding.json"));
 		await fs.writeFile(path.join(tmpDir, "src", "a.c"), gbk("// 中文注释\nint x = 1;\n"));
 		await expect(
 			grep({

@@ -4,12 +4,16 @@ import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import {
 	decodeStrict,
+	decodeTextByMode,
 	discoverEncodingPolicy,
 	gbkDecodeFailureUtf8Hint,
 	gbkUtf8AmbiguityNotice,
-	resolveFileEncoding,
+	resolveTextDecision,
+	type TextDecodeMode,
 	unavailableEncodingDiagnostic,
+	unmanagedGbkFallbackNotice,
 } from "../encoding/index";
+import { cfgTextEncodingReadFallback } from "../encoding/settings";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -31,6 +35,8 @@ import {
 	isProbablyBinary,
 	isProbablyBinaryHeader,
 	isEnoent,
+	isStructuralBinary,
+	isStructuralBinaryHeader,
 	logger,
 	parseImageMetadata,
 	prompt,
@@ -252,10 +258,15 @@ async function readWholeFile(absolutePath: string): Promise<Buffer | undefined> 
  *
  * `encoding === "gbk"` decodes through the strict codec instead — the same
  * decode the Rust edit engine applies, so the displayed text, the snapshot
- * hash, and any later edit all agree on one text.
+ * hash, and any later edit all agree on one text. `"utf8-then-gbk"` is the
+ * read-only fallback order for files no fixed policy manages (strict UTF-8
+ * first, then strict GBK); it never feeds the write path.
  */
-function deriveBufferedFileText(bytes: Buffer, encoding?: "gbk"): BufferedFileText {
-	const rawText = decodeStrict(bytes, encoding ?? "utf8");
+function deriveBufferedFileText(bytes: Buffer, encoding?: TextDecodeMode, absolutePath?: string): BufferedFileText {
+	const rawText =
+		encoding === "utf8-then-gbk"
+			? decodeTextByMode(bytes, "utf8-then-gbk", absolutePath ?? "<file>")
+			: decodeStrict(bytes, encoding ?? "utf8");
 	const strippedText = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
 	// `normalizeToLF` allocates a copy; skip it outright for the common LF file.
 	const normalizedText = strippedText.includes("\r") ? normalizeToLF(strippedText) : strippedText;
@@ -299,6 +310,7 @@ interface ReadLineWindow {
 	/** The exact un-normalized raw bytes corresponding to the collected lines. */
 	collectedRawBytes?: Uint8Array;
 	rawDiagnosticIncompleteReason?: "budget" | "fragment";
+	effectiveCodec?: "utf8" | "gbk";
 }
 
 function omittedRequestedLine(
@@ -513,8 +525,13 @@ function sameSeekFileIdentity(identity: SeekFileIdentity, stat: SeekFileIdentity
 interface StreamFileLinesOptions {
 	includeTerminalNewline?: boolean;
 	stopScanAfterCollect?: boolean;
-	/** Strictly decode lines as GBK (policy-managed files) instead of UTF-8. */
-	encoding?: "gbk";
+	/**
+	 * Strict decode mode: `"gbk"` (policy-managed), `"utf8-then-gbk"` (the
+	 * read-only fallback order — retry the scanned window as GBK only after
+	 * strict UTF-8 fails, restarting collection), or absent
+	 * for strict UTF-8.
+	 */
+	encoding?: "gbk" | "utf8-then-gbk";
 	/**
 	 * Start scanning at byte `byte`, which begins 0-indexed line `line` (`line <= startLine`).
 	 * Lines before `startLine` contribute nothing but their count, so skipping them is exact.
@@ -582,7 +599,7 @@ async function streamLinesFromFile(
 		// LF/CR never occur inside a GBK double-byte sequence, so the byte-level
 		// line split above never cut a character in half; strict decoding of the
 		// whole line either succeeds or reports the offending offset.
-		if (encoding === "gbk") {
+		if (streamCodec === "gbk") {
 			try {
 				return decodeStrict(whole, "gbk");
 			} catch (error) {
@@ -689,7 +706,10 @@ async function streamLinesFromFile(
 
 	setupLineState();
 
-	const validationDecoder = new TextDecoder(encoding ?? "utf-8", { fatal: true });
+	// Each pass uses one strict codec. A failed UTF-8 pass is discarded in
+	// full before retrying as GBK; no prefix sample or mixed decoded lines.
+	const streamCodec: "utf8" | "gbk" = encoding === "gbk" ? "gbk" : "utf8";
+	let validationDecoder: TextDecoder;
 	try {
 		fileHandle = await fs.open(filePath, "r");
 		// Offsets from an earlier scan only hold for the same, unchanged file.
@@ -700,6 +720,8 @@ async function streamLinesFromFile(
 			endedWithNewline = false;
 			setupLineState();
 		}
+
+		validationDecoder = new TextDecoder(streamCodec, { fatal: true });
 
 		while (true) {
 			throwIfAborted(signal);
@@ -712,7 +734,7 @@ async function streamLinesFromFile(
 			try {
 				validationDecoder.decode(chunk, { stream: true });
 			} catch (decodeError) {
-				if (encoding === "gbk") {
+				if (streamCodec === "gbk") {
 					const hint = findGbkValidationFailureHint(
 						chunk,
 						lineIndex,
@@ -776,13 +798,23 @@ async function streamLinesFromFile(
 		}
 		if (reachedEof) validationDecoder.decode();
 	} catch (error) {
+		if (encoding === "utf8-then-gbk" && error instanceof TypeError) {
+			await fileHandle?.close();
+			fileHandle = null;
+			throwIfAborted(signal);
+			return streamLinesFromFile(filePath, startLine, maxLinesToCollect, maxBytes, selectedLineLimit, signal, {
+				...options,
+				encoding: "gbk",
+			});
+		}
 		if (error instanceof ToolError) throw error;
 		const incomplete =
-			encoding === "gbk" && error instanceof TypeError
+			streamCodec === "gbk" && error instanceof TypeError
 				? unavailableEncodingDiagnostic(filePath, "fragment", { scope: "window" }).notice
 				: undefined;
+		const codecLabel = streamCodec === "gbk" ? "GBK" : "UTF-8";
 		throw new ToolError(
-			`${filePath}: ${String(error)}. Text reads (including :raw) require valid ${encoding ?? "UTF-8"}. Configure this project's .omp/encoding.json with explicit include and encoding overrides; do not rewrite the source to recover a read.${incomplete ? ` ${incomplete}` : ""}`,
+			`${filePath}: ${String(error)}. Text reads (including :raw) require valid ${codecLabel}. Configure this project's encoding policy (.ompg/encoding.json via \`ompg encoding init\`, or the .omp alias) with explicit include rules; do not rewrite the source to recover a read.${incomplete ? ` ${incomplete}` : ""}`,
 		);
 	} finally {
 		if (fileHandle) {
@@ -798,14 +830,14 @@ async function streamLinesFromFile(
 	if (firstLinePreviewBytes > 0) {
 		// Prefix may end mid-character: a streaming decoder holds that suffix
 		// instead of manufacturing U+FFFD. The scanned bytes were validated above.
-		const text = new TextDecoder(encoding ?? "utf-8", { fatal: true }).decode(
+		const text = new TextDecoder(streamCodec, { fatal: true }).decode(
 			Buffer.concat(firstLinePreviewChunks, firstLinePreviewBytes),
 			{ stream: true },
 		);
 		firstLinePreview = { text, bytes: Buffer.byteLength(text, "utf8") };
 	}
 
-	if (encoding === "gbk" && collectedLines.length === 0 && firstLinePreview)
+	if (streamCodec === "gbk" && collectedLines.length === 0 && firstLinePreview)
 		rawDiagnosticIncompleteReason ??= "fragment";
 	const collectedRawBytes = rawDiagnosticIncompleteReason
 		? undefined
@@ -825,6 +857,7 @@ async function streamLinesFromFile(
 		hasTrailingNewline: reachedEof && endedWithNewline,
 		collectedRawBytes,
 		rawDiagnosticIncompleteReason,
+		effectiveCodec: streamCodec,
 	};
 }
 
@@ -1640,7 +1673,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
-		fileEncoding?: "gbk",
+		fileEncoding?: "gbk" | "utf8-then-gbk",
 	): Promise<{
 		outputText: string;
 		columnCut: ColumnCut | undefined;
@@ -2199,6 +2232,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// whose bytes are also strictly valid UTF-8 decodes per policy, but the
 		// reader must know both readings exist. Appended to the result below.
 		let gbkAmbiguityNotice: string | undefined;
+		// Read-only GBK fallback notice for files no fixed policy manages.
+		let gbkFallbackNotice: string | undefined;
 		const imageHeader = wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
 		const imageMetadata = isRawSelector(parsed)
 			? null
@@ -2313,11 +2348,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} else {
 			// `wholeFileBytes` was materialized once above for the image sniff;
 			// reuse it here instead of a second full read.
-			// Encoding policy: a GBK-managed file decodes through the strict codec
-			// (same decode as the edit engine) instead of UTF-8. A UTF-8 BOM under
-			// a GBK rule is a policy conflict reported before any decoding.
-			const fileEncoding = located ? undefined : resolveFileEncoding(this.session.cwd, absolutePath, true);
-			const managedGbk = fileEncoding === "gbk";
+			// Encoding decision resolves from the TARGET's own directory (a
+			// GBK default in the session project must not blanket external
+			// trees; an external project's own policy governs its files):
+			// fixed GBK → strict GBK; fixed UTF-8/auto/unmanaged → strict
+			// UTF-8 with the read-only global fallback (utf8-then-gbk) for
+			// non-policy files per `textEncoding.readFallback`.
+			const textDecision = located ? { assignment: "unmanaged" as const } : resolveTextDecision(absolutePath);
+			const managedGbk = textDecision.assignment === "gbk";
+			const readFallback = cfgTextEncodingReadFallback.get(this.session.settings);
 			if (managedGbk) {
 				const bom = wholeFileBytes
 					? wholeFileBytes.subarray(0, 3)
@@ -2336,20 +2375,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				managedGbk && wholeFileBytes
 					? gbkUtf8AmbiguityNotice(this.session.cwd, absolutePath, wholeFileBytes)
 					: undefined;
-			// Binary sniff before any UTF-8 text materialization. A binary file
-			// (font, object, archive, packed blob) decodes to NUL/control bytes and
-			// U+FFFD mojibake that corrupts the terminal and burns context. Images,
-			// notebooks, and markit-convertible documents were already routed above;
-			// everything reaching here is meant to be plain text. `:raw` bypasses
-			// the format sniff but still requires strict text decoding. This guard
-			// covers both the multi-range and single-range disk paths below.
+			// Binary sniff before any UTF-8 text materialization. With the
+			// read fallback enabled, only STRUCTURAL binary (NUL bytes) is a
+			// refusal — invalid UTF-8 alone may be GBK text and flows into the
+			// strict fallback below instead of being mislabeled binary.
+			const structuralOnly = !managedGbk && readFallback === "utf8-then-gbk";
 			const looksBinary =
 				!isRawSelector(parsed) &&
 				(managedGbk
 					? false
 					: wholeFileBytes
-						? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
-						: await isProbablyBinary(absolutePath));
+						? structuralOnly
+							? isStructuralBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
+							: isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
+						: structuralOnly
+							? await isStructuralBinary(absolutePath)
+							: await isProbablyBinary(absolutePath));
 			// Executables and IDBs open in IDA instead of being refused. Speculative
 			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
 			// ordinary execution that does.
@@ -2379,12 +2420,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					.sourcePath(renderAbsolutePath)
 					.done();
 			}
+			// Decode mode: fixed GBK policy → strict GBK; auto scope or
+			// (unmanaged + utf8-then-gbk setting) → read-only fallback order;
+			// everything else strict UTF-8. Explicit UTF-8 never falls back.
+			const decodeMode: TextDecodeMode = managedGbk
+				? "gbk"
+				: textDecision.assignment === "auto" ||
+					  (textDecision.assignment === "unmanaged" && readFallback === "utf8-then-gbk")
+					? "utf8-then-gbk"
+					: "utf8";
+			// Visible notice when the fallback actually engaged (bytes are
+			// invalid UTF-8 but strictly valid GBK). Read-only semantics are
+			// stated in the notice itself.
+			const fallbackNotice =
+				decodeMode === "utf8-then-gbk" && wholeFileBytes
+					? unmanagedGbkFallbackNotice(absolutePath, wholeFileBytes)
+					: undefined;
+			gbkFallbackNotice = fallbackNotice;
 			// Decode only what survived the sniff.
 			let buffered: BufferedFileText | undefined;
 			try {
-				buffered = wholeFileBytes
-					? deriveBufferedFileText(wholeFileBytes, managedGbk ? "gbk" : undefined)
-					: undefined;
+				buffered = wholeFileBytes ? deriveBufferedFileText(wholeFileBytes, decodeMode, absolutePath) : undefined;
 			} catch (error) {
 				// Bytes that are valid UTF-8 prove the file cannot be GBK at all;
 				// prefer that definitive hint over the generic guidance.
@@ -2401,7 +2457,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (located?.spec.unbounded) {
 				const text =
 					buffered?.strippedText ??
-					decodeStrict(await Bun.file(absolutePath).bytes(), managedGbk ? "gbk" : "utf8");
+					decodeTextByMode(
+						await Bun.file(absolutePath).bytes(),
+						decodeMode === "gbk" ? "gbk" : decodeMode,
+						absolutePath,
+					);
 				return buildInMemorySelectorResult(this.session, text, parsed, {
 					details: { resolvedPath: renderAbsolutePath },
 					sourcePath: renderAbsolutePath,
@@ -2479,7 +2539,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 						!located, // located URLs read their backing file directly, as their handlers do
-						managedGbk ? "gbk" : undefined,
+						decodeMode === "utf8" ? undefined : decodeMode,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -2559,7 +2619,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									includeTerminalNewline: rawSelector,
 									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
 									seek: tailSeekTo?.(startLine),
-									encoding: managedGbk ? "gbk" : undefined,
+									encoding: decodeMode === "utf8" ? undefined : decodeMode,
 								},
 							);
 
@@ -2575,6 +2635,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						reachedEof,
 						hasTrailingNewline,
 					} = lineWindow;
+					if (!gbkFallbackNotice && decodeMode === "utf8-then-gbk" && lineWindow.effectiveCodec === "gbk") {
+						gbkFallbackNotice = `${absolutePath}: not valid UTF-8; decoded as GBK through the read-only automatic fallback (no encoding policy covers this path). This inference does NOT authorize GBK writes — create an explicit project policy (ompg encoding init --profile gbk-source) before editing this file.`;
+					}
 					if (
 						managedGbk &&
 						!gbkAmbiguityNotice &&
@@ -2930,6 +2993,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				firstText.text += `\n\n[${gbkAmbiguityNotice}]`;
 			} else {
 				content = [{ type: "text", text: `[${gbkAmbiguityNotice}]` }, ...content];
+			}
+		}
+		if (gbkFallbackNotice) {
+			const firstText = content.find((c): c is TextContent => c.type === "text");
+			if (firstText) {
+				firstText.text += `\n\n[${gbkFallbackNotice}]`;
+			} else {
+				content = [{ type: "text", text: `[${gbkFallbackNotice}]` }, ...content];
 			}
 		}
 		if (suffixResolution) {

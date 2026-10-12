@@ -1396,7 +1396,7 @@ fn stage_from_parts(
 		None => None,
 	};
 	let encoding = if use_new_encoding || read.is_none() {
-		new_file_encoding(policy, &resolved)
+		new_file_encoding(policy, &resolved)?
 	} else {
 		match read.as_deref() {
 			Some(read) => (read.encoding != TextEncoding::Utf8).then_some(read.encoding),
@@ -1601,7 +1601,7 @@ fn preview_entry(
 			},
 			_ => {
 				if is_notebook_path(&entry.resolved.absolute)
-					|| new_file_encoding(policy, &entry.resolved) == Some(TextEncoding::Gbk)
+					|| new_file_encoding(policy, &entry.resolved)? == Some(TextEncoding::Gbk)
 				{
 					persist_new(policy, &entry.resolved, text)?;
 				}

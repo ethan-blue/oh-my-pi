@@ -2,7 +2,9 @@
  * Project protected mode (R10): an opt-in, execution-layer restriction for
  * projects whose text files must only be touched by the native tools.
  *
- * `.omp/protected-mode.json` (always UTF-8) at the project root:
+ * `.ompg/protected-mode.json` (always UTF-8) at the project root (the legacy
+ * `.omp/protected-mode.json` alias is equally honored; same-root conflicts
+ * fail closed):
  *
  * ```json
  * {
@@ -30,8 +32,13 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import {
+	findProjectConfigUpward,
+	invalidateProjectConfigCaches,
+	PROJECT_CONFIG_NAMESPACES,
+	type ProjectConfigFile,
+} from "@oh-my-pi/pi-utils";
 import { logger } from "@oh-my-pi/pi-utils";
 import { extractLiteralAndChainSegments } from "./shell-tokenize";
 
@@ -48,64 +55,155 @@ export interface ProtectedModeConfig {
 	buildTasks: ProtectedBuildTask[];
 }
 
+function normalizeProtectedConfig(cfg: ProtectedModeConfig): string {
+	const sortedTasks = [...cfg.buildTasks].sort((a, b) => a.id.localeCompare(b.id));
+	return JSON.stringify({
+		enabled: cfg.enabled,
+		buildTasks: sortedTasks.map(t => ({ id: t.id, exe: t.exe, args: t.args })),
+	});
+}
 export interface DiscoveredProtectedMode {
 	root: string;
 	mtimeMs: number;
+	/** Raw config contents, for content-based cache validation. */
+	json?: string;
 	config: ProtectedModeConfig;
 }
 
-const CONFIG_RELATIVE = path.join(".omp", "protected-mode.json");
+const CONFIG_FILE = "protected-mode.json";
 const cache = new Map<string, DiscoveredProtectedMode>();
 const NEGATIVE_TTL_MS = 1000;
 const negativeCache = new Map<string, number>();
 
-/** Find the nearest `.omp/protected-mode.json` at or above `cwd`. */
+function readConfig(lookup: ProjectConfigFile): DiscoveredProtectedMode {
+	const cached = cache.get(lookup.configPath);
+	let json: string;
+	try {
+		json = fs.readFileSync(lookup.configPath, "utf8");
+	} catch (error) {
+		// A protected-mode file that exists but cannot be read fails CLOSED:
+		// a permission problem is not "no protection".
+		if ((error as NodeJS.ErrnoException).code === "EACCES") {
+			logger.warn("Unreadable protected-mode.json; failing closed", {
+				path: lookup.configPath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			const denied: DiscoveredProtectedMode = {
+				root: lookup.root,
+				mtimeMs: 0,
+				config: { enabled: true, buildTasks: [] },
+			};
+			cache.set(lookup.configPath, denied);
+			return denied;
+		}
+		throw error;
+	}
+	if (cached && cached.json === json) return cached;
+	try {
+		const parsed = parseConfig(json);
+		const discovered: DiscoveredProtectedMode = { root: lookup.root, mtimeMs: 0, json, config: parsed };
+		cache.set(lookup.configPath, discovered);
+		return discovered;
+	} catch (error) {
+		// An invalid protected-mode file is a configuration error the
+		// user must fix; fail closed (treat as enabled, deny-all).
+		logger.warn(`Invalid ${lookup.namespace}/protected-mode.json; failing closed`, {
+			path: lookup.configPath,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		const discovered: DiscoveredProtectedMode = {
+			root: lookup.root,
+			mtimeMs: 0,
+			json,
+			config: { enabled: true, buildTasks: [] },
+		};
+		cache.set(lookup.configPath, discovered);
+		return discovered;
+	}
+}
+
+/**
+ * Find the nearest `protected-mode.json` at or above `cwd`, preferring
+ * `.ompg` over `.omp` at the same root (never merged). When both namespaces
+ * carry a file at the SAME root with different contents, the semantics are
+ * ambiguous — fail closed instead of silently relaxing via precedence.
+ */
 export function discoverProtectedMode(cwd: string): DiscoveredProtectedMode | undefined {
 	const start = path.resolve(cwd);
 	const negativeAt = negativeCache.get(start);
 	if (negativeAt !== undefined && Date.now() - negativeAt < NEGATIVE_TTL_MS) {
 		return undefined;
 	}
-	const home = os.homedir();
-	let dir = start;
-	for (;;) {
-		const configPath = path.join(dir, CONFIG_RELATIVE);
-		let stat: fs.Stats | undefined;
-		try {
-			stat = fs.statSync(configPath);
-		} catch {
-			// keep walking
-		}
-		if (stat?.isFile()) {
-			const cached = cache.get(dir);
-			if (cached && cached.mtimeMs === stat.mtimeMs) return cached;
-			try {
-				const parsed = parseConfig(fs.readFileSync(configPath, "utf8"));
-				const discovered: DiscoveredProtectedMode = { root: dir, mtimeMs: stat.mtimeMs, config: parsed };
-				cache.set(dir, discovered);
-				return discovered;
-			} catch (error) {
-				// An invalid protected-mode file is a configuration error the
-				// user must fix; fail closed (treat as enabled, deny-all).
-				logger.warn("Invalid .omp/protected-mode.json; failing closed", {
-					path: configPath,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				const discovered: DiscoveredProtectedMode = {
-					root: dir,
-					mtimeMs: stat.mtimeMs,
-					config: { enabled: true, buildTasks: [] },
-				};
-				cache.set(dir, discovered);
-				return discovered;
-			}
-		}
-		if (dir === home || path.dirname(dir) === dir) {
-			negativeCache.set(start, Date.now());
-			return undefined;
-		}
-		dir = path.dirname(dir);
+	const lookup = findProjectConfigUpward(start, CONFIG_FILE);
+	if (!lookup) {
+		negativeCache.set(start, Date.now());
+		return undefined;
 	}
+	if (lookup.status !== "found") {
+		// The preferred entry cannot even be inspected: fail closed with a
+		// deny-all config rather than falling back to an older, possibly
+		// weaker file.
+		logger.warn("Unstat-able protected-mode.json; failing closed", {
+			path: lookup.configPath,
+		});
+		const denied: DiscoveredProtectedMode = {
+			root: path.dirname(path.dirname(lookup.configPath)),
+			mtimeMs: 0,
+			config: { enabled: true, buildTasks: [] },
+		};
+		return denied;
+	}
+	// Conflict probe: a same-root legacy file with DIFFERENT content makes
+	// the protection state ambiguous — deny-all until the user reconciles.
+	for (const namespace of PROJECT_CONFIG_NAMESPACES) {
+		if (namespace === lookup.namespace) continue;
+		const other = path.join(lookup.root, namespace, CONFIG_FILE);
+		let otherStat: fs.Stats;
+		try {
+			otherStat = fs.statSync(other);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code === "ENOENT" || code === "ENOTDIR") continue;
+			// An inspection error on the peer file makes the protection ambiguous — fail closed.
+			logger.warn("Unstat-able peer protected-mode.json; failing closed", { path: other, error });
+			const conflict: DiscoveredProtectedMode = {
+				root: lookup.root,
+				mtimeMs: 0,
+				config: { enabled: true, buildTasks: [] },
+			};
+			return conflict;
+		}
+		let same = false;
+		try {
+			if (!otherStat.isFile()) throw new Error("Peer configuration is not a regular file");
+			const otherJson = fs.readFileSync(other, "utf8");
+			const primary = readConfig(lookup);
+			const otherParsed = parseConfig(otherJson);
+			same = normalizeProtectedConfig(primary.config) === normalizeProtectedConfig(otherParsed);
+		} catch {
+			same = false;
+		}
+		if (!same) {
+			logger.warn("Conflicting protected-mode.json in .ompg and .omp; failing closed", {
+				ompg: path.join(lookup.root, ".ompg", CONFIG_FILE),
+				omp: path.join(lookup.root, ".omp", CONFIG_FILE),
+			});
+			const conflict: DiscoveredProtectedMode = {
+				root: lookup.root,
+				mtimeMs: 0,
+				config: { enabled: true, buildTasks: [] },
+			};
+			return conflict;
+		}
+	}
+	return readConfig(lookup);
+}
+
+/** Drop cached discovery state (after a user-side config change). */
+export function invalidateProtectedModeCaches(): void {
+	cache.clear();
+	negativeCache.clear();
+	invalidateProjectConfigCaches();
 }
 
 function parseConfig(json: string): ProtectedModeConfig {
@@ -192,7 +290,7 @@ export function checkProtectedCommand(
 				`protected mode is enabled for this project (${discovered.root}); arbitrary shell syntax ` +
 				`(pipes, redirects, expansions, scripts) is refused before execution. Use the native ` +
 				`read/edit/write/search tools for files; builds must go through a configured task in ` +
-				`.omp/protected-mode.json as a simple invocation.`,
+				`.ompg/protected-mode.json (or the .omp alias) as a simple invocation.`,
 		};
 	}
 	const [invokedExe, ...invokedArgs] = tokens;
@@ -236,27 +334,35 @@ export function assertProtectedConfigMutation(filePath: string): void {
 			/* New ancestors. */
 		}
 	}
+	// Identity check against every protected-mode file the discovery could
+	// select at or above the target (hardlink/alias protection).
 	const policy = discoverProtectedMode(path.dirname(absolute));
 	if (policy) {
-		let target: fs.Stats | undefined;
-		let config: fs.Stats | undefined;
-		try {
-			target = fs.statSync(absolute);
-			config = fs.statSync(path.join(policy.root, CONFIG_RELATIVE));
-		} catch {
-			/* A new target has no hardlink identity. Lexical checks still apply below. */
+		for (const namespace of PROJECT_CONFIG_NAMESPACES) {
+			const configPath = path.join(policy.root, namespace, CONFIG_FILE);
+			let target: fs.Stats | undefined;
+			let config: fs.Stats | undefined;
+			try {
+				target = fs.statSync(absolute);
+				config = fs.statSync(configPath);
+			} catch {
+				/* A new target has no hardlink identity. Lexical checks still apply below. */
+			}
+			if (target && config && target.dev === config.dev && target.ino === config.ino) {
+				throw new Error("protected mode configuration is user-managed; agent tools cannot modify it");
+			}
 		}
-		if (target && config && target.dev === config.dev && target.ino === config.ino)
-			throw new Error("protected mode configuration is user-managed; agent tools cannot modify it");
 	}
 	for (const candidate of [absolute, canonical]) {
-		if (
-			candidate.replaceAll("\\", "/").toLowerCase().endsWith("/.omp/protected-mode.json") ||
-			fs.existsSync(path.join(candidate, CONFIG_RELATIVE)) ||
-			(path.basename(candidate).toLowerCase() === ".omp" &&
-				fs.existsSync(path.join(candidate, "protected-mode.json")))
-		) {
-			throw new Error("protected mode configuration is user-managed; agent tools cannot modify or remove it");
+		const normalized = candidate.replaceAll("\\", "/").toLowerCase();
+		for (const namespace of PROJECT_CONFIG_NAMESPACES) {
+			if (
+				normalized.endsWith(`/${namespace}/${CONFIG_FILE}`) ||
+				fs.existsSync(path.join(candidate, namespace, CONFIG_FILE)) ||
+				(path.basename(candidate).toLowerCase() === namespace && fs.existsSync(path.join(candidate, CONFIG_FILE)))
+			) {
+				throw new Error("protected mode configuration is user-managed; agent tools cannot modify or remove it");
+			}
 		}
 	}
 }

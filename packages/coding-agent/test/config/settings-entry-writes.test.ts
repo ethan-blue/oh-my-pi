@@ -37,6 +37,16 @@ describe("Settings entry-level writes", () => {
 	});
 
 	const configPath = () => path.join(agentDir, "config.yml");
+
+	it.each(["config.yml", "config.yaml"])("persists project model roles to the selected .ompg %s", async filename => {
+		const preferred = path.join(cwd, ".ompg", filename);
+		await Bun.write(preferred, "modelRoles:\n  default: test/old\n");
+		const settings = await Settings.loadIsolated({ agentDir, cwd });
+		settings.setProjectModelRole("default", "test/new");
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(preferred).text())).toEqual({ modelRoles: { default: "test/new" } });
+		expect(await Bun.file(path.join(cwd, ".omp", "config.yml")).exists()).toBe(false);
+	});
 	const readConfig = async (): Promise<RawSettings> => YAML.parse(await Bun.file(configPath()).text()) as RawSettings;
 
 	async function load(config: RawSettings, overlay: RawSettings): Promise<Settings> {

@@ -10,6 +10,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { type Settings as NativeSettings, settingsCapability } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { type Skill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
@@ -17,7 +19,7 @@ import { type SystemPrompt, systemPromptCapability } from "@oh-my-pi/pi-coding-a
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Importing discovery registers all providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
-import { __resetDirsFromEnvForTests, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getMCPConfigPath, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 let tempDir: string;
 let home: string;
@@ -90,6 +92,65 @@ test("a project .omp between cwd and home is still found", async () => {
 
 	expect(prompts.map(p => [p.path, p.level])).toEqual([[path.join(project, ".omp", "SYSTEM.md"), "project"]]);
 });
+
+test("an encoding-only .ompg directory does not shadow legacy prompt artifacts", async () => {
+	const project = path.join(home, "mixed");
+	writeFile(path.join(project, ".ompg", "encoding.json"), "{}");
+	writeFile(path.join(project, ".omp", "SYSTEM.md"), "legacy prompt\n");
+	writeFile(path.join(project, ".omp", "AGENTS.md"), "legacy instructions\n");
+	const ctx: LoadContext = { cwd: project, home, repoRoot: project };
+	const prompts = await loadNative<SystemPrompt>(systemPromptCapability.id, ctx);
+	const contexts = await loadNative<ContextFile>(contextFileCapability.id, ctx);
+	expect(prompts.map(item => item.path)).toEqual([path.join(project, ".omp", "SYSTEM.md")]);
+	expect(contexts.map(item => item.path)).toEqual([path.join(project, ".omp", "AGENTS.md")]);
+});
+
+test("MCP selects the preferred whole file and skills discover both project namespaces", async () => {
+	const project = path.join(home, "preferred");
+	writeFile(
+		path.join(project, ".ompg", "mcp.json"),
+		JSON.stringify({ mcpServers: { preferred: { command: "preferred-test" } } }),
+	);
+	writeFile(
+		path.join(project, ".omp", "mcp.json"),
+		JSON.stringify({ mcpServers: { legacy: { command: "legacy-test" } } }),
+	);
+	for (const [namespace, name] of [
+		[".ompg", "new-skill"],
+		[".omp", "old-skill"],
+	]) {
+		writeFile(
+			path.join(project, namespace!, "skills", name!, "SKILL.md"),
+			`---\nname: ${name}\ndescription: test skill\n---\nbody\n`,
+		);
+	}
+	const ctx: LoadContext = { cwd: project, home, repoRoot: project };
+	const servers = await loadNative<MCPServer>(mcpCapability.id, ctx);
+	expect(servers.map(item => item.name)).toEqual(["preferred"]);
+	expect(getMCPConfigPath("project", project)).toBe(path.join(project, ".ompg", "mcp.json"));
+	const skills = await loadNative<Skill>(skillCapability.id, ctx);
+	expect(skills.map(item => item.name).sort()).toEqual(["new-skill", "old-skill"]);
+});
+
+test.each(["config.yml", "config.yaml"])(
+	"project settings prefer a whole .ompg %s without merging legacy fields",
+	async filename => {
+		const project = path.join(home, "settings");
+		writeFile(path.join(project, ".ompg", filename), "textEncoding:\n  readFallback: strict-utf8\n");
+		writeFile(
+			path.join(project, ".omp", "config.yml"),
+			"textEncoding:\n  readFallback: utf8-then-gbk\ntheme: legacy-only\n",
+		);
+		const settings = await loadNative<NativeSettings>(settingsCapability.id, {
+			cwd: project,
+			home,
+			repoRoot: project,
+		});
+		expect(settings).toHaveLength(1);
+		expect(settings[0]?.path).toBe(path.join(project, ".ompg", filename));
+		expect(settings[0]?.data).toEqual({ textEncoding: { readFallback: "strict-utf8" } });
+	},
+);
 
 test("noncanonical home never becomes a native project config root", async () => {
 	const project = path.join(home, "scratch");

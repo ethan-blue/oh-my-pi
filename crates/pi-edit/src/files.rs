@@ -136,7 +136,7 @@ pub fn persist_new(policy: &PathPolicy, resolved: &Resolved, after_lf: &str) -> 
 		&resolved.absolute,
 		after_lf,
 		policy
-			.resolve_encoding(&resolved.absolute, false)
+			.resolve_encoding(&resolved.absolute, false)?
 			.unwrap_or(TextEncoding::Utf8),
 	)
 	.map_err(EditError::apply)?;
@@ -144,7 +144,7 @@ pub fn persist_new(policy: &PathPolicy, resolved: &Resolved, after_lf: &str) -> 
 		return notebook::serialize_edited_notebook_text(None, after_lf, &resolved.display)
 			.map_err(|err| EditError::apply(err.to_string()));
 	}
-	if policy.resolve_encoding(&resolved.absolute, false) == Some(TextEncoding::Gbk) {
+	if policy.resolve_encoding(&resolved.absolute, false)? == Some(TextEncoding::Gbk) {
 		// New files have no original bytes to preserve.
 		persist_gbk_guard(&resolved.display, false, false, after_lf)?;
 	}
@@ -160,7 +160,10 @@ fn pathdiff_rel(root: &Path, path: &Path) -> String {
 }
 
 /// New-file encoding the policy assigns to `resolved` (for write requests).
-pub fn new_file_encoding(policy: &PathPolicy, resolved: &Resolved) -> Option<TextEncoding> {
+pub fn new_file_encoding(
+	policy: &PathPolicy,
+	resolved: &Resolved,
+) -> EditResult<Option<TextEncoding>> {
 	policy.resolve_encoding(&resolved.absolute, false)
 }
 
@@ -326,7 +329,7 @@ impl FileCache {
 		let managed_encoding = if is_notebook {
 			None
 		} else {
-			self.policy.resolve_encoding(&resolved.absolute, true)
+			self.policy.resolve_encoding(&resolved.absolute, true)?
 		};
 		let mut bytes_unstable = false;
 		let (raw, encoding) = match managed_encoding {

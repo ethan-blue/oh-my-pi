@@ -10,7 +10,13 @@ import path from "node:path";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
+import { formatAge, formatBytes, isStructuralBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
+import {
+	decodeTextByMode,
+	resolveTextDecision,
+	type TextDecodeMode,
+	unmanagedGbkFallbackNotice,
+} from "../encoding/index";
 import {
 	formatHashlineHeader,
 	formatNumberedLines,
@@ -192,7 +198,12 @@ export function extractFileMentions(text: string): string[] {
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
-	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: EditStore },
+	options?: {
+		autoResizeImages?: boolean;
+		useHashLines?: boolean;
+		snapshotStore?: EditStore;
+		textEncodingReadFallback?: "utf8-then-gbk" | "strict-utf8";
+	},
 ): Promise<AgentMessage[]> {
 	if (filePaths.length === 0) return [];
 
@@ -295,7 +306,8 @@ export async function generateFileMentionMessages(
 				});
 				continue;
 			}
-			if (await isProbablyBinary(absolutePath)) {
+			const bytes = await Bun.file(absolutePath).bytes();
+			if (await isStructuralBinary(absolutePath)) {
 				files.push({
 					path: resolvedPath,
 					content: `(skipped auto-read: binary file, ${formatBytes(stat.size)})`,
@@ -304,8 +316,29 @@ export async function generateFileMentionMessages(
 				});
 				continue;
 			}
-
-			const content = await Bun.file(absolutePath).text();
+			const readFallback = options?.textEncodingReadFallback ?? "utf8-then-gbk";
+			const decision = resolveTextDecision(absolutePath);
+			const decodeMode: TextDecodeMode =
+				decision.assignment === "gbk"
+					? "gbk"
+					: decision.assignment === "auto"
+						? "utf8-then-gbk"
+						: decision.assignment === "unmanaged" && readFallback === "utf8-then-gbk"
+							? "utf8-then-gbk"
+							: "utf8";
+			let content: string;
+			try {
+				content = decodeTextByMode(bytes, decodeMode, absolutePath);
+			} catch (error) {
+				files.push({
+					path: resolvedPath,
+					content: `(skipped auto-read: ${error instanceof Error ? error.message : String(error)})`,
+					byteSize: stat.size,
+					skippedReason: "binary",
+				});
+				continue;
+			}
+			if (content.startsWith("\u{FEFF}")) content = content.slice(1);
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
 			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
@@ -315,6 +348,13 @@ export async function generateFileMentionMessages(
 			if (snapshotStore) {
 				const tag = snapshotStore.recordSnapshot(absolutePath, normalized);
 				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;
+			}
+			const fallbackNotice =
+				decision.assignment === "unmanaged" && readFallback === "utf8-then-gbk"
+					? unmanagedGbkFallbackNotice(absolutePath, bytes)
+					: undefined;
+			if (fallbackNotice) {
+				output += `\n[${fallbackNotice}]`;
 			}
 			files.push({ path: resolvedPath, content: output, lineCount });
 		} catch {

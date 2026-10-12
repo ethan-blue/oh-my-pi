@@ -19,7 +19,7 @@ import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { grep } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function createSession(cwd: string): ToolSession {
+function createSession(cwd: string, overrides: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -27,7 +27,7 @@ function createSession(cwd: string): ToolSession {
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
 		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
-		settings: Settings.isolated(),
+		settings: Settings.isolated(overrides),
 		enableLsp: false,
 	};
 }
@@ -227,7 +227,7 @@ describe("GBK project encoding policy", () => {
 		const uncovered = path.join(tmpDir, "notes.txt");
 		await Bun.write(managed, GBK_SOURCE);
 		await Bun.write(uncovered, GBK_SOURCE);
-		const tool = new ReadTool(createSession(tmpDir));
+		const tool = new ReadTool(createSession(tmpDir, { "textEncoding.readFallback": "strict-utf8" }));
 		expect(resultText(await tool.execute("managed", { path: `${managed}:raw` }))).toContain("中文");
 		await expect(tool.execute("uncovered", { path: `${uncovered}:raw` })).rejects.toThrow("include");
 		expect(await Bun.file(uncovered).bytes()).toEqual(GBK_SOURCE);
@@ -254,12 +254,12 @@ describe("GBK project encoding policy", () => {
 		try {
 			const file = path.join(external, "verify.py");
 			await Bun.write(file, GBK_SOURCE);
-			const outside = new ReadTool(createSession(tmpDir));
+			const outside = new ReadTool(createSession(tmpDir, { "textEncoding.readFallback": "strict-utf8" }));
 			const outsideText = resultText(await outside.execute("read", { path: file }));
 			expect(outsideText).toContain("outside");
 			expect(outsideText).not.toContain("\uFFFD");
 			await expect(outside.execute("raw", { path: `${file}:raw` })).rejects.toThrow("outside");
-			const noPolicy = new ReadTool(createSession(external));
+			const noPolicy = new ReadTool(createSession(external, { "textEncoding.readFallback": "strict-utf8" }));
 			const noPolicyText = resultText(await noPolicy.execute("read", { path: file }));
 			expect(noPolicyText).toContain("No encoding policy");
 			expect(noPolicyText).not.toContain("\uFFFD");
@@ -324,7 +324,7 @@ describe("GBK project encoding policy", () => {
 		// file still hits the binary refusal exactly like upstream.
 		const utf8File = path.join(tmpDir, "notes.md");
 		await fs.writeFile(utf8File, "说明\n");
-		const session = createSession(tmpDir);
+		const session = createSession(tmpDir, { "textEncoding.readFallback": "strict-utf8" });
 		const tool = new WriteTool(session);
 		await tool.execute("write-1", { path: utf8File, content: "改写\n" });
 		const onDisk = Buffer.from(await fs.readFile(utf8File));

@@ -41,6 +41,30 @@ export function isProbablyBinaryHeader(header: Uint8Array): boolean {
 }
 
 /**
+ * Classify an in-memory byte header as STRUCTURAL binary only: a NUL byte in
+ * the header marks true binary (or NUL-padded UTF-16/32). Invalid UTF-8 alone
+ * is NOT binary — it may be another text encoding (e.g. GBK source), whose
+ * decode decision belongs to the caller's encoding policy, not to this sniff.
+ */
+export function isStructuralBinaryHeader(header: Uint8Array): boolean {
+	return header.indexOf(0) !== -1;
+}
+
+/**
+ * Sniff the first {@link BINARY_SNIFF_BYTES} of `filePath` for structural
+ * binary content (NUL bytes). Invalid UTF-8 alone is not "binary" here; see
+ * {@link isStructuralBinaryHeader}.
+ */
+export function isStructuralBinary(filePath: string, maxBytes = BINARY_SNIFF_BYTES): Promise<boolean> {
+	return peekFile(filePath, maxBytes, isStructuralBinaryHeader);
+}
+
+/** Synchronous {@link isStructuralBinary}. */
+export function isStructuralBinarySync(filePath: string, maxBytes = BINARY_SNIFF_BYTES): boolean {
+	return peekFileSync(filePath, maxBytes, isStructuralBinaryHeader);
+}
+
+/**
  * Sniff the first {@link BINARY_SNIFF_BYTES} of `filePath` and report whether it
  * is binary (non-UTF-8-text). See {@link isProbablyBinaryHeader} for the rule.
  */

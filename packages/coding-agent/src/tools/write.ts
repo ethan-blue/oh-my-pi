@@ -1,6 +1,8 @@
 import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
 import { Database } from "bun:sqlite";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
+import * as nodePath from "node:path";
 import * as path from "node:path";
 import { assertProtectedConfigMutation } from "./protected-mode";
 
@@ -40,6 +42,7 @@ import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 import {
 	assertSourceEncoding,
+	assertTextWriteEligibility,
 	discoverEncodingPolicy,
 	encodeStrict,
 	readGbkAmbiguityDiagnostic,
@@ -948,6 +951,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 
 			emitWriteProgress(onUpdate, cleanBytes, displayPath, absolutePath);
+			if (target === undefined) {
+				try {
+					assertTextWriteEligibility(absolutePath, existing !== undefined, () => {
+						try {
+							return fsSync.readFileSync(absolutePath);
+						} catch {
+							return undefined;
+						}
+					});
+				} catch (err) {
+					throw new ToolError(err instanceof Error ? err.message : String(err));
+				}
+			}
 
 			// Encoding policy: a GBK-managed destination encodes strictly (and
 			// refuses unrepresentable characters before anything is written);

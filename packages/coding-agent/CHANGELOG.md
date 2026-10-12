@@ -4,10 +4,14 @@
 
 ### Added
 
+- Added `ompg encoding doctor/init`, automatic read-only GBK fallback, and preferred `.ompg` project configuration with `.omp` compatibility ([#4](https://github.com/ethan-blue/oh-my-pi/issues/4)).
+
 - Added `outputEncoding` to local bash captures, including PTY, and eval's Python subprocess PIPE / JavaScript byte-write captures: pass `gbk` for CP936 or `utf8` for UTF-8-only decoding. Capture results report completed readers, mixed encodings, substitutions, and incomplete provenance without inventing a uniform encoding or zero loss.
 - Captured Python kernel fd-1 bytes with a persistent native decoder and an explicit kernel-scope label; late output and cross-cell fragments are no longer attributed to the next cell's stdout.
 
 ### Fixed
+
+- Fixed GBK reads and mixed-encoding searches without project policies, nested and external target encoding, large-file decode consistency, and configuration cache refresh; unsafe ambiguous or mixed policy/source writes are refused ([#4](https://github.com/ethan-blue/oh-my-pi/issues/4)).
 
 - Preserved grep's NUL binary-file exclusion before strict encoding validation, including bounded oversized searches and explicit-file fast paths; SQLite caches no longer abort text searches.
 - Prevented Python raw-output duplex pipe deadlocks with a bounded credit window and an EOF text-delivery acknowledgement; display truncation still drains and counts captured bytes.

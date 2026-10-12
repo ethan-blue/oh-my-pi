@@ -4,12 +4,14 @@ import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import {
 	assertSourceEncoding,
 	assertStableGbkBytes,
+	assertTextWriteEligibility,
 	encodeStrict,
 	gbkUtf8AmbiguityNotice,
 	readTextWithPolicy,
 	resolveWriteEncoding,
 } from "../encoding/index";
 import { assertProtectedConfigMutation } from "../tools/protected-mode";
+import { assertConfigMutationBatch, invalidateConfigCachesAfterMutation } from "../tools/fs-cache-invalidation";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -190,14 +192,17 @@ export async function writeTextWithPolicy(filePath: string, text: string): Promi
 			if (!isEnoent(error)) throw error;
 			return undefined;
 		});
+	assertTextWriteEligibility(filePath, original !== undefined, () => original);
 	const encoding = resolveWriteEncoding(filePath, original !== undefined);
 	assertSourceEncoding(filePath, text, encoding);
 	if (encoding === "gbk") {
 		if (original) assertStableGbkBytes(original, filePath);
 		await Bun.write(filePath, encodeStrict(text, "gbk"));
+		invalidateConfigCachesAfterMutation(filePath);
 		return;
 	}
 	await Bun.write(filePath, text);
+	invalidateConfigCachesAfterMutation(filePath);
 }
 
 /** Read a file through the encoding policy (GBK-managed files decode strictly). */
@@ -368,6 +373,12 @@ export async function applyWorkspaceEdit(
 	const executed: ExecutedWorkspaceChange[] = [];
 	const encodingNotes: string[] = [];
 	const record = (change: ExecutedWorkspaceChange) => {
+		if (change.kind === "rename") {
+			invalidateConfigCachesAfterMutation(uriToFile(change.oldUri));
+			invalidateConfigCachesAfterMutation(uriToFile(change.newUri));
+		} else {
+			invalidateConfigCachesAfterMutation(uriToFile(change.uri));
+		}
 		executed.push(change);
 		onExecuted?.(change);
 	};
@@ -381,6 +392,9 @@ export async function applyWorkspaceEdit(
 		// every output BEFORE the first write, so one unrepresentable file
 		// fails the whole batch instead of leaving earlier files modified.
 		await precheckTextOpEncodings(ops, cwd, encodingNotes);
+		assertConfigMutationBatch(
+			ops.flatMap(op => (op.kind === "rename" ? [uriToFile(op.oldUri), uriToFile(op.newUri)] : [uriToFile(op.uri)])),
+		);
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
@@ -496,6 +510,7 @@ export async function applyWorkspaceEdit(
 			cwd,
 			encodingNotes,
 		);
+		assertConfigMutationBatch(Object.keys(changes).map(uriToFile));
 		for (const uri in changes) {
 			const textEdits = changes[uri];
 			if (textEdits.length === 0) continue;
@@ -581,6 +596,7 @@ async function precheckTextOpEncodings(
 		}
 		const bytes = state?.bytes;
 		if (!bytes) throw new ToolError(`LSP workspace edit targets unreadable file: ${filePath}`);
+		assertTextWriteEligibility(filePath, true, () => bytes);
 		const { text: content } = readTextWithPolicy(path.dirname(filePath), filePath, bytes);
 		if (cwd && encodingNotes) {
 			const note = gbkUtf8AmbiguityNotice(cwd, filePath, bytes);

@@ -23,6 +23,7 @@ export * from "./mime";
 export * from "./path";
 export * from "./path-tree";
 export * from "./peek-file";
+export * from "./project-config";
 export * as postmortem from "./postmortem";
 export * from "./process-name";
 export * as procmgr from "./procmgr";

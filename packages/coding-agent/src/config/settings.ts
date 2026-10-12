@@ -21,6 +21,7 @@ import {
 	getLastChangelogVersionPath,
 	getProjectDir,
 	getProjectAgentDir,
+	findProjectConfigUpward,
 	isEnoent,
 	isRecord,
 	logger,
@@ -1171,9 +1172,10 @@ export class Settings {
 		};
 		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
 		const projectCwd = path.resolve(this.#cwd);
-		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
+		for (const ns of [".ompg", ".omp"]) {
+			for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(projectCwd, ns, filename));
+			addFile(path.join(projectCwd, ns, "settings.json"));
+		}
 		addFile(path.join(projectCwd, ".claude", "settings.json"));
 		for (const file of this.#projectSourcePaths) addFile(file);
 		for (const file of this.#configFiles) addFile(file);
@@ -2402,10 +2404,19 @@ export class Settings {
 		// warning prefix below must all derive from the same absolute scope so
 		// relative cwds (e.g. ".") produce absolute provider paths that match.
 		const discoveryCwd = path.resolve(cwd);
-		const projectConfigDir = getProjectAgentDir(cwd);
-		const projectConfigPath = path.join(projectConfigDir, "config.yml");
-		invalidateCapabilityFsCache(projectConfigPath);
-		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
+		const ompgConfigPath = path.join(discoveryCwd, ".ompg", "config.yml");
+		const ompConfigPath = path.join(discoveryCwd, ".omp", "config.yml");
+		const lookup = findProjectConfigUpward(discoveryCwd, MAIN_CONFIG_FILENAMES, { stopAt: discoveryCwd });
+		if (lookup && lookup.status !== "found") throw lookup.cause;
+		const projectConfigPath = lookup?.configPath ?? ompConfigPath;
+		for (const ns of [".ompg", ".omp"]) {
+			for (const filename of MAIN_CONFIG_FILENAMES)
+				invalidateCapabilityFsCache(path.join(discoveryCwd, ns, filename));
+		}
+		invalidateCapabilityFsCache(ompgConfigPath);
+		invalidateCapabilityFsCache(ompConfigPath);
+		invalidateCapabilityFsCache(path.join(discoveryCwd, ".ompg", "settings.json"));
+		invalidateCapabilityFsCache(path.join(discoveryCwd, ".omp", "settings.json"));
 		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
@@ -3844,7 +3855,9 @@ export class Settings {
 	async #saveProjectNow(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
 
-		const projectConfigPath = path.join(getProjectAgentDir(this.#cwd), "config.yml");
+		const lookup = findProjectConfigUpward(this.#cwd, MAIN_CONFIG_FILENAMES, { stopAt: this.#cwd });
+		if (lookup && lookup.status !== "found") throw lookup.cause;
+		const projectConfigPath = lookup?.configPath ?? path.join(getProjectAgentDir(this.#cwd), "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		this.#modifiedProjectModelRoles.clear();
 

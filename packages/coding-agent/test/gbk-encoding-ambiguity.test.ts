@@ -39,7 +39,7 @@ import {
 import { astGrep } from "@oh-my-pi/pi-natives";
 import { READ_CHUNK_SIZE } from "@oh-my-pi/pi-coding-agent/tools/read-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-function createSession(cwd: string): ToolSession {
+function createSession(cwd: string, settingOverrides: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -53,6 +53,7 @@ function createSession(cwd: string): ToolSession {
 			"astEdit.enabled": false,
 			"grep.enabled": false,
 			"glob.enabled": false,
+			...settingOverrides,
 		}),
 		enableLsp: false,
 	};
@@ -203,7 +204,7 @@ describe("GBK/UTF-8 encoding ambiguity diagnostics (G4)", () => {
 	it("grep names the proven UTF-8 bytes when the GBK decode fails", async () => {
 		await fs.writeFile(path.join(tmpDir, "src", "odd.md"), UTF8_NOT_GBK);
 		await expect(
-			new GrepTool(createSession(tmpDir)).execute("grep-1", {
+			new GrepTool(createSession(tmpDir, { "textEncoding.invalidSearchFile": "fail" })).execute("grep-1", {
 				pattern: "int",
 				path: path.join(tmpDir, "src"),
 			}),
@@ -427,7 +428,7 @@ describe("GBK/UTF-8 encoding ambiguity diagnostics (G4)", () => {
 		expect(resolveText).not.toContain("also valid UTF-8");
 	});
 
-	it("AST preview and queued apply use their native call policy rather than a nested file-directory policy", async () => {
+	it("AST preview follows nested policy and queued apply rechecks a changed child policy", async () => {
 		const file = path.join(tmpDir, "src", "nested.c");
 		const bytes = Buffer.concat([
 			encoder.encode("// "),
@@ -446,12 +447,12 @@ describe("GBK/UTF-8 encoding ambiguity diagnostics (G4)", () => {
 				overrides: [],
 			}),
 		);
-		await expect(
-			new AstEditTool(createSession(tmpDir)).execute("preview", {
-				ops: [{ pat: "int $VAR = 1;", out: "int $VAR = 42;" }],
-				paths: [file],
-			}),
-		).rejects.toThrow("round-trip stable");
+		const preview = await new AstEditTool(createSession(tmpDir)).execute("preview", {
+			ops: [{ pat: "int $VAR = 1;", out: "int $VAR = 42;" }],
+			paths: [file],
+		});
+		expect(resultText(preview)).toContain("42");
+		expect(resultText(preview)).not.toContain("also valid UTF-8");
 		expect(await Bun.file(file).bytes()).toEqual(bytes);
 		await Bun.write(
 			path.join(tmpDir, ".omp", "encoding.json"),
@@ -466,7 +467,17 @@ describe("GBK/UTF-8 encoding ambiguity diagnostics (G4)", () => {
 			paths: [file],
 		});
 		expect(queue.hasPendingInvoker).toBe(true);
-		await Bun.write(path.join(tmpDir, ".omp", "encoding.json"), POLICY);
+		await Bun.write(
+			path.join(tmpDir, "src", ".omp", "encoding.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				include: ["**"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "gbk",
+				overrides: [],
+			}),
+		);
 		await expect(
 			new WriteTool(session).execute("resolve", {
 				path: "xd://resolve",

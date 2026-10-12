@@ -1871,7 +1871,10 @@ export interface EncodingPolicyOptions {
 
 /** Policy answer for one path, with the origin that selected it. */
 export interface EncodingResolution {
-  /** `"utf8"` or `"gbk"`. */
+  /**
+   * `"utf8"`, `"gbk"`, or `"auto"` (schemaVersion 2 read branch: strict
+   * UTF-8 first, then strict GBK; never a write authorization).
+   */
   encoding: string
   /** `true` when an explicit override entry matched. */
   fromOverride: boolean
@@ -2166,6 +2169,23 @@ export interface GrepOptions {
    * patterns match and result lines render correctly.
    */
   encodingPolicy?: EncodingPolicyOptions
+  /**
+   * Multi-root encoding policies (nearest project root wins per file).
+   * Mutually exclusive with `encodingPolicy`.
+   */
+  encodingPolicies?: Array<EncodingPolicyOptions>
+  /**
+   * `"report"` skips files that cannot be decoded and reports them
+   * (`searchComplete=false` plus bounded samples); `"fail"` (default)
+   * aborts the search with an actionable encoding error.
+   */
+  onUndecodable?: string
+  /**
+   * `"utf8-then-gbk"` reads files no policy manages as strict UTF-8
+   * first, then strict GBK (read-only fallback, never applied to explicit
+   * UTF-8/GBK assignments); `"strict-utf8"` (default) refuses them.
+   */
+  unmanagedReadFallback?: string
   /** Abort signal for cancelling the operation. */
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
@@ -2224,6 +2244,30 @@ export interface GrepResult {
    * policy — this is a diagnostic, never an encoding switch.
    */
   ambiguousEncodingFiles?: Array<string>
+  /**
+   * `Some(false)` when files that could not be decoded were skipped in
+   * report mode — the matches describe only the successfully searched
+   * files, never "no results anywhere".
+   */
+  searchComplete?: boolean
+  /**
+   * Number of files skipped because neither strict UTF-8 nor the policy
+   * encoding could decode them (report mode).
+   */
+  undecodableFileCount?: number
+  /**
+   * Bounded samples (path + reason) of the undecodable files; the count
+   * above is exact, this list is capped.
+   */
+  undecodableFiles?: Array<GrepUndecodableFile>
+}
+
+/** A file skipped in report mode because it could not be decoded. */
+export interface GrepUndecodableFile {
+  /** Path as it would appear in matches. */
+  path: string
+  /** Why the file could not be searched (encoding + offset; never content). */
+  reason: string
 }
 
 /**

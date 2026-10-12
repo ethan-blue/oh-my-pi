@@ -24,7 +24,7 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function makeSession(cwd: string): ToolSession {
+function makeSession(cwd: string, overrides: Record<string, unknown> = {}): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -39,6 +39,7 @@ function makeSession(cwd: string): ToolSession {
 			"astEdit.enabled": false,
 			"grep.enabled": false,
 			"glob.enabled": false,
+			...overrides,
 		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
@@ -121,7 +122,7 @@ describe("R10 protected mode and native recovery (A01–A10)", () => {
 		await Bun.write(file, Buffer.from(original));
 
 		// Read fails with the policy-gap diagnosis, not a bare binary refusal.
-		const session = makeSession(tmpDir);
+		const session = makeSession(tmpDir, { "textEncoding.readFallback": "strict-utf8" });
 		const read = await new ReadTool(session).execute("read-1", { path: file });
 		const text = resultText(read);
 		expect(text).toContain("encoding.json");

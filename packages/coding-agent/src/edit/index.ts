@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { mkdir } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,6 +29,7 @@ import {
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import {
 	assertSourceEncoding,
+	assertTextWriteEligibility,
 	discoverEncodingPolicy,
 	readGbkAmbiguityDiagnostic,
 	encodeStrict,
@@ -48,6 +50,7 @@ import {
 	writeFileWithFallback,
 } from "../tools/file-write-fallback";
 import {
+	assertConfigMutationBatch,
 	invalidateFsScanAfterDelete,
 	invalidateFsScanAfterRename,
 	invalidateFsScanAfterWrite,
@@ -496,6 +499,33 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.setArgsJson(argsJson);
 			open.native.finish();
 		}
+		let inspection: EditInspection;
+		try {
+			inspection = editInspect(this.mode, argsJson);
+		} catch {
+			inspection = { paths: [], entries: [], fileOps: [] };
+		}
+		const { paths, fileOps } = inspection;
+		const targetsToCheck = [...paths];
+		for (const op of fileOps) {
+			if (op.kind === "move" && op.to !== undefined) targetsToCheck.push(op.to);
+		}
+		assertConfigMutationBatch(targetsToCheck);
+		for (const target of targetsToCheck) {
+			const abs = path.isAbsolute(target) ? target : path.resolve(this.session.cwd, target);
+			try {
+				const exists = fs.existsSync(abs);
+				assertTextWriteEligibility(abs, exists, () => {
+					try {
+						return fs.readFileSync(abs);
+					} catch {
+						return undefined;
+					}
+				});
+			} catch (err) {
+				throw new ToolError(err instanceof Error ? err.message : String(err));
+			}
+		}
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
 		// G4 pre-write diagnostics collected by #write: files whose on-disk
@@ -660,6 +690,26 @@ export class EditTool implements AgentTool<TInput> {
 	async #write(request: EditWriteRequest, signal?: AbortSignal, encodingNotes?: string[]): Promise<EditWriteResponse> {
 		assertProtectedConfigMutation(request.path);
 		if (request.moveTo) assertProtectedConfigMutation(request.moveTo);
+		if (request.op !== "delete") {
+			assertTextWriteEligibility(request.path, request.op === "update", () => {
+				try {
+					return fs.readFileSync(request.path);
+				} catch {
+					return undefined;
+				}
+			});
+			if (request.moveTo) {
+				const moveTo = request.moveTo;
+				const destExists = fs.existsSync(moveTo);
+				assertTextWriteEligibility(moveTo, destExists, () => {
+					try {
+						return fs.readFileSync(moveTo);
+					} catch {
+						return undefined;
+					}
+				});
+			}
+		}
 		const gbk = request.encoding === "gbk";
 		// Before the first disk mutation, flag a GBK-managed existing file whose
 		// current bytes are also valid UTF-8 — the edit applies either way (the

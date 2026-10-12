@@ -210,12 +210,16 @@ impl EditStore {
 	}
 
 	/// Resolve the encoding `record_file` would decode `absolute` with.
-	fn file_encoding(&self, absolute: &Path) -> Option<crate::encoding::TextEncoding> {
-		self
-			.encoding
-			.lock()
-			.as_ref()
-			.and_then(|policy| policy.resolve(absolute, true))
+	fn file_encoding(
+		&self,
+		absolute: &Path,
+	) -> Result<Option<crate::encoding::TextEncoding>, String> {
+		let captured = self.encoding.lock().clone();
+		let home = std::env::var_os("USERPROFILE")
+			.or_else(|| std::env::var_os("HOME"))
+			.map_or_default(PathBuf::from);
+		let policy = crate::path_policy::discover_policy_upward(absolute, &home, captured.as_ref())?;
+		Ok(policy.and_then(|policy| policy.resolve(absolute, true)))
 	}
 
 	/// Construct a store with explicit limits.
@@ -270,7 +274,7 @@ impl EditStore {
 		if std::fs::metadata(absolute).ok()?.len() > MAX_SNAPSHOT_FILE_BYTES {
 			return None;
 		}
-		let raw = match self.file_encoding(absolute) {
+		let raw = match self.file_encoding(absolute).ok()? {
 			None | Some(crate::encoding::TextEncoding::Utf8) => {
 				std::fs::read_to_string(absolute).ok()?
 			},
