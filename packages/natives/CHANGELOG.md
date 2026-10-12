@@ -14,6 +14,28 @@
 - Withheld PTY uniform encoding and substitution totals after cancellation, reader failure, failed forwarding or incomplete draining.
 - Applied encoding include rules to new files and rejected Python source encoding conflicts before editing ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 - Rejected invalid UTF-8 or GBK search input instead of returning replacement-character matches ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
+## [18.10.0] - 2026-10-12
+
+### Added
+
+- Added `IpcServer`, `IpcConnection`, and `ipcEndpoint`: a local IPC transport over Unix sockets and Windows named pipes with owner-only access, single-instance binding, stale-endpoint takeover, and newline framing.
+
+### Changed
+
+- Optimized transport performance with task-local write coalescing and batch-based newline processing
+
+## [18.9.2] - 2026-10-11
+
+### Fixed
+
+- Fixed stalls when highlighting Markdown tool previews containing many inline spans or backslash escapes.
+
+## [18.9.1] - 2026-10-11
+
+### Fixed
+
+- Fixed executable scripts without a `#!` line failing with "Exec format error" in the embedded shell ([#15271](https://github.com/can1357/oh-my-pi/pull/15271) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.9.0] - 2026-10-11
 
 ### Added

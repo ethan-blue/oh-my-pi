@@ -6,6 +6,26 @@
 
 - Added streaming output callbacks to managed process execution without retaining complete stdout.
 - Added an injectable `outputDecoder` factory to managed process execution, so callers capture stdout/stderr with one shared decode policy instead of the default UTF-8-only `TextDecoder`.
+## [18.10.0] - 2026-10-12
+
+### Added
+
+- Added `getMnemopiEmbedRuntimeDir()` for the shared mnemopi embedding server endpoints and logs.
+
+### Fixed
+
+- Fixed `ChildProcess.kill()` silently leaving the child running when the native process handle could not be resolved or used; it now signals the child directly and escalates to SIGKILL after the grace period.
+
+## [18.9.2] - 2026-10-11
+
+### Changed
+
+- Improved streaming JSON parsing performance for tool arguments containing many string values.
+
+### Fixed
+
+- Fixed parsing of long strings that contain closing delimiters other than double or single quotes.
+
 ## [18.9.0] - 2026-10-11
 
 ### Breaking Changes

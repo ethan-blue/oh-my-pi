@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [18.9.2] - 2026-10-11
+
+### Breaking Changes
+
+- Renamed `TypeSafeJudge` to `NativeJudge` and `TypeSafeApiError` to `JudgmentApiError`, including their associated option types. `JUDGMENT_ROUTES` has been removed; use `isJudgmentApi` or create a judge for catalog models with `createNativeJudge(model, { apiKey })`.
+
+### Added
+
+- Added native judge support for OpenAI’s Decisions API and Cloudflare Workers AI decision models, including the `openai-decisions` and `workers-ai-systemone` APIs. The auth gateway’s System One route supports both providers.
+- Added `createNativeJudge(model, { apiKey, headers, fetch })` for creating judges from catalog models with their configured request model IDs and question limits.
+- Added Cloudflare Workers AI authentication with `loginCloudflareWorkersAi`, storing the API token and account ID; logging in again with the same token replaces the existing credential.
+- Added automatic question batching to `NativeJudge` for endpoints with question limits, with up to four concurrent batches and merged answers and usage reporting. Usage from successful batches is reported through partial-usage callbacks and both session and auth-gateway usage ledgers, even if another batch fails.
+
+### Changed
+
+- Improved Anthropic prompt caching for long conversations, reducing memory usage while selecting cache breakpoints.
+
+### Fixed
+
+- Fixed Devin-routed OpenAI models returning `invalid_argument` on every turn after an existing session was switched from `openai-codex`.
+
+## [18.9.1] - 2026-10-11
+
+### Added
+
+- Added `compat.supportsThinkingBindingControls` for Bedrock Converse: setting it to `false` stops prefix-bound Claude requests from sending `thinking.block_binding`, the `thinking-binding-controls-2026-08-01` beta and the `/input_transformations` response path, for gateways or regions that reject them ([#15316](https://github.com/can1357/oh-my-pi/pull/15316) by [@harshaygadekar](https://github.com/harshaygadekar))
+
+### Fixed
+
+- Fixed Bedrock Claude Fable 5.1 requests with thinking off and a forced tool choice sending the forced choice next to adaptive thinking; the choice now falls back to `auto` ([#15316](https://github.com/can1357/oh-my-pi/pull/15316) by [@harshaygadekar](https://github.com/harshaygadekar))
+
 ## [18.9.0] - 2026-10-11
 
 ### Breaking Changes
