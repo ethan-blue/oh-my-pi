@@ -1,23 +1,34 @@
-# ompg v18.10.2-gbk.1（Windows x64 预发布）
+# ompg v18.10.2-gbk.2（Windows x64 预发布）
 
-合并 OMP 官方 v18.10.2，保留 ompg 命令、用户数据隔离、严格 GBK codec、Hashline 和 Windows 分版本安装器。源码和构建身份见包内 build-info.json。
+本版基于已合并的 OMP v18.10.2，修复 [Issue #5](https://github.com/ethan-blue/oh-my-pi/issues/5) 中可在当前源码和本机验证的缺陷，保留上一版 GBK/Hashline、.ompg 配置发现与原版 omp 共存能力。构建来源见 build-info.json。
 
-## Issue #4 修复
+## 本轮修复
 
-- 无需创建配置目录即可 read/grep 合法 GBK 源码。严格 UTF-8 失败才回退严格 GBK；读取明确标注推断来源，推断不授权写入。
-- 递归搜索兼容 GBK/UTF-8 混合工程和子工程策略；坏文件默认报告并继续，零命中不冒充未搜索文件没有结果。
-- .ompg 工程配置优先，.omp 兼容；对应文件缺失才回退，坏配置不降级。doctor/init、全局只读开关、config.yml/config.yaml、MCP、skills 和提示文件入口贯通。
-- 修复父策略覆盖子工程、外部 read/edit 不一致、AST 解码/持久化错用 cwd 策略、大文件边界误判和混用编码。
-- 编辑/LSP 修改配置立即失效缓存；配置和源码的混合批次在写前拒绝。auto 真正双合法字节要求显式 override，仅 UTF-8 合法文件正常编辑。
-- 保留原 GBK 字节、BOM/换行冲突保护、Python coding 声明保护以及命令输出混合/未知来源报告。doctor 显示实际 fork 发行号并单列上游版本。
+- 自定义 Cloud Code Assist provider 别名继承 Gemini 3+ 首调用签名 bypass；中断且缺失有效首签名的历史调用组不再重放为 functionCall。配对工具结果保留为用户观察；真实首签名覆盖的并行调用不被误删。
+- Windows 真 TTY 使用现有 native writer 的后台线程，缓慢终端排空不再在 JS 线程直接执行阻塞写。保留 FIFO、Unicode、pending、dead、有界 stop 与构造失败回退。
+- 新增 task.agentRuntimeOverrides：按精确 agent 名设置运行上限，显式 run 参数优先，0 取消上限，缺失时使用全局 task.maxRuntimeMs。结构化、in-process 与 workpool follow-up 统一解析。
+- 工程原生配置重载合并完整策略，避免能力发现缓存或新建配置导致 task/retry 等组遗漏。
+- stats parser worker 静默无响应时请求默认 60 秒到期，退出本轮并释放同步锁，后续同步可用新 worker 重试。stats.db 仍是按同步更新的派生库。
+- 包装脚本的默认发行号复用 Core 中央发行号，避免遗漏 fork 后缀造成同版本不同字节。
 
-关联：[Issue #4](https://github.com/ethan-blue/oh-my-pi/issues/4)。具体回归和未验证边界见 VALIDATION.md。
+## herdr 桥接是独立更新
 
-## 合并后的 Windows 修复
+[ompg-herdr-bridge](https://github.com/ethan-blue/ompg-herdr-bridge) 修复真正串行发送、完整匹配 ACK、错误响应误报健康、切换会话旧 context、延迟元数据覆盖与旧 reporter 退出后发送。
 
-- `rmdir e/.` 拒绝移除目录，并验证原目录保留。
-- LSP mux 关闭等待自己的子进程退出；断开的会话完成文档清理后再复用服务器；重叠 connect 请求只能绑定一次。
-- 统一 LSP 工程配置入口继续识别 .ompg 优先和 .omp 兼容，使用实际 loadConfig 回归验证。
+桥接提交：3a74e1885ed2005b8d8dbb3ba7c7083b52e58c83。Core ZIP 不自动替换用户扩展；请按桥接 README 单独更新、每个 pane 保留一个集成报告方，再重启对应 pane。没有对用户机器执行安装或卸载。
+
+## 配置示例
+
+工程 .ompg/config.yml，或 ompg config path 显示的用户设置文件：
+
+```yaml
+task:
+  maxRuntimeMs: 600000
+  agentRuntimeOverrides:
+    worker: 1200000
+```
+
+worker 是示例，须替换为实际 agent 的精确名字。值必须为 0 至 2147483647 的整数；不会自动扩大所有 agent 的上限。现有 .omp 配置继续兼容。
 
 ## 升级与回退
 
@@ -27,13 +38,12 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
 ```
 
-自定义安装目录时沿用原 -InstallDir；新开终端 ompg --version 应为 ompg/18.10.2-gbk.1。
-支持本版安装器 -Download -Version 18.10.2-gbk.1；回退用 -Download -Version 18.9.0-gbk.1。旧包保留，不覆盖同版本的不同字节。
+沿用原自定义 -InstallDir；新开终端 ompg --version 应为 ompg/18.10.2-gbk.2。
+本版脚本也支持 -Download -Version 18.10.2-gbk.2；回退用 -Download -Version 18.10.2-gbk.1。
+默认 %LOCALAPPDATA%\ompg 分版本安装，保留原版 omp、旧包与 ~/.ompg；同版本不同字节拒绝覆盖。ompg update 继续阻断官方替换。
 
-默认安装根 %LOCALAPPDATA%\ompg，用户数据根 ~/.ompg，保留原版 omp。ompg update 继续阻断官方更新，避免替换成原版。
+## 验收边界
 
-## 发布边界
+仅 Windows x64 AVX2，未签名预发布。GBK 推断仍只读；写入需要明确工程策略，GB18030 不支持，保护模式不是 OS 沙箱。
 
-仅 Windows x64 AVX2，未签名预发布。GB18030 不支持。保护模式是工具入口限制，不是操作系统沙箱；外部程序、第三方扩展和可信构建仍需自行约束。
-
-真实 E630/Keil、真实模型、其他平台和完整 symlink 权限场景尚未验收；不把环境阻塞或 skipped 计为通过。输出已经被 ConPTY 或用户代码错误解码的内容不可恢复。
+另一台机器的原始日志不可访问，用户允许缺证据项不改。真实 Gemini 400、41.425 秒 stall、stats 9:55 停更和 herdr GUI 闪烁未完成原机复现；本版不宣称这些现象全部根治。Unix、真实 E630/Keil、ConPTY 性能 A/B 与 Windows symlink 权限场景未验收。已跑门禁见 VALIDATION.md，详细范围见 docs/gbk-handoff/36。

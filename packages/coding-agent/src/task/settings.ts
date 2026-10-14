@@ -8,9 +8,10 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { logger, MAX_TIMER_DELAY_MS, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
@@ -365,6 +366,46 @@ export const cfgTaskMaxRuntimeMs = register({
 		],
 	},
 });
+
+export const cfgTaskAgentRuntimeOverrides = register({
+	id: "task.agentRuntimeOverrides",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, number>,
+	validate: (value: unknown): Record<string, number> => {
+		if (value === undefined || value === null) return {};
+		if (typeof value !== "object" || Array.isArray(value)) {
+			throw new Error("Invalid task.agentRuntimeOverrides: expected a map of agent name to runtime milliseconds.");
+		}
+		const entries: Array<[string, number]> = [];
+		for (const [name, runtime] of Object.entries(value)) {
+			if (
+				typeof runtime !== "number" ||
+				!Number.isSafeInteger(runtime) ||
+				runtime < 0 ||
+				runtime > MAX_TIMER_DELAY_MS
+			) {
+				throw new Error(
+					`Invalid task.agentRuntimeOverrides.${name}: expected integer milliseconds from 0 to ${MAX_TIMER_DELAY_MS} (0 disables the cap).`,
+				);
+			}
+			entries.push([name, runtime]);
+		}
+		return Object.fromEntries(entries);
+	},
+});
+
+/** Explicit run limit wins; otherwise resolve an exact agent name before the global cap. */
+export function resolveTaskMaxRuntimeMs(settings: Settings, agentName: string, explicit?: number): number {
+	const overrides = cfgTaskAgentRuntimeOverrides.get(settings);
+	const selected =
+		explicit ?? (Object.hasOwn(overrides, agentName) ? overrides[agentName] : cfgTaskMaxRuntimeMs.get(settings));
+	const runtime = Math.max(0, Math.trunc(Number(selected) || 0));
+	if (!Number.isFinite(runtime) || runtime > MAX_TIMER_DELAY_MS) {
+		throw new Error(`Subagent runtime exceeds the supported timer range (0 to ${MAX_TIMER_DELAY_MS} milliseconds).`);
+	}
+	return runtime;
+}
 
 export const cfgTaskCompletionProbe = register({
 	id: "task.completionProbe",

@@ -523,6 +523,45 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("dispatches the named agent runtime instead of applying the global cap to every worker", async () => {
+		mockDiscovery();
+		const childSession = session({
+			settings: Settings.isolated({
+				"task.maxRuntimeMs": 600_000,
+				"task.agentRuntimeOverrides": { worker: 1_200_000 },
+			}),
+		});
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+		try {
+			expect(dispatched[0]?.maxRuntimeMs).toBe(1_200_000);
+		} finally {
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves unlimited named runtime and lets an explicit run cap override it", async () => {
+		mockDiscovery();
+		const childSession = session({
+			settings: Settings.isolated({
+				"task.maxRuntimeMs": 600_000,
+				"task.agentRuntimeOverrides": { worker: 0 },
+			}),
+		});
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		await runStructuredSubagent(request({ session: childSession }));
+		await runStructuredSubagent(request({ session: childSession, maxRuntimeMs: 1234 }));
+		expect(dispatched.map(options => options.maxRuntimeMs)).toEqual([0, 1234]);
+	});
+
 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
 		mockDiscovery();
 		const blockedSession = session();

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevented interrupted unsigned Gemini tool-call groups from being replayed as executable calls, while retaining observations and valid signed parallel calls ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

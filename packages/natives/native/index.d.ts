@@ -619,8 +619,8 @@ export declare class TextPredictor {
  */
 export declare class TtyWriter {
   /**
-   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-   * when the descriptor cannot be duplicated.
+   * Start a pump thread for `fd` (typically 1). Windows supports
+   * stdout/stderr; when the descriptor cannot be duplicated.
    */
   constructor(fd: number)
   /**

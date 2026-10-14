@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, MAX_TIMER_DELAY_MS, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -105,6 +105,8 @@ export interface SyncOptions {
 	 * parse on the calling thread without spawning workers. File I/O is pipelined.
 	 */
 	workers?: number;
+	/** Deadline per parser request; a silent worker must release the sync lock. Default 60 seconds. */
+	workerTimeoutMs?: number;
 	/**
 	 * Sync only these transcripts (e.g. files a watcher saw change) instead of
 	 * listing every session. Missing files are skipped.
@@ -177,7 +179,7 @@ function spawnWorker(): WorkerHandle {
 	return handle;
 }
 
-function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<ParseSessionResult> {
+function dispatch(handle: WorkerHandle, request: SyncWorkerRequest, timeoutMs: number): Promise<ParseSessionResult> {
 	if (handle.busy) {
 		return Promise.reject(new Error("worker is busy - this is a bug in the dispatcher"));
 	}
@@ -185,8 +187,17 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 	handle.busy = true;
 	handle.resolve = resolve;
 	handle.reject = reject;
-	handle.worker.postMessage(request);
-	return promise;
+	try {
+		handle.worker.postMessage(request);
+	} catch (error) {
+		handle.busy = false;
+		handle.resolve = null;
+		handle.reject = null;
+		reject(error);
+	}
+	// A worker can exit without producing an error/message event. Never let
+	// that leave the sync lock held forever; StatsLive retries with fresh workers.
+	return withTimeout(promise, timeoutMs, `Stats sync worker timed out after ${timeoutMs}ms`);
 }
 
 /**
@@ -246,6 +257,14 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  * bar walks at a steady rate).
  */
 export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
+	if (
+		opts?.workerTimeoutMs !== undefined &&
+		(!Number.isSafeInteger(opts.workerTimeoutMs) ||
+			opts.workerTimeoutMs < 1 ||
+			opts.workerTimeoutMs > MAX_TIMER_DELAY_MS)
+	) {
+		throw new Error(`workerTimeoutMs must be integer milliseconds from 1 to ${MAX_TIMER_DELAY_MS}`);
+	}
 	return withStatsSyncLock(getStatsDbPath(), async () => {
 		let processed = 0;
 		let files = 0;
@@ -461,7 +480,11 @@ async function syncAllSessionsLocked(
 						handle = spawnWorker();
 						handles.push(handle);
 					}
-					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
+					return dispatch(
+						handle,
+						{ sessionFile: file, fromOffset, parserState, replay },
+						opts?.workerTimeoutMs ?? 60_000,
+					);
 				});
 				if (!failed) acceptFile(files[idx], parsed);
 			}

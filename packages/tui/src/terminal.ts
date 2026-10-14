@@ -837,7 +837,7 @@ export class ProcessTerminal implements Terminal {
 	// to drain. See StdoutStallWatchdog, #6854, and #10430.
 	#stdoutStall = new StdoutStallWatchdog();
 	#stdoutStallTimer?: Timer;
-	// Off-thread output pump (unix TTYs): Bun's `process.stdout.write` blocks
+	// Off-thread output pump: Bun's `process.stdout.write` blocks
 	// the event loop until the terminal drains, so a slow/occluded emulator
 	// froze the whole TUI for the duration of a multi-MB repaint. The pump
 	// enqueues frames and performs the blocking write(2) on its own thread;
@@ -1049,11 +1049,11 @@ export class ProcessTerminal implements Terminal {
 		// emergency restore finds it on crash.
 		setActiveTerminal(this);
 		terminalEverStarted = true;
-		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
+		// Own blocking terminal writes on a pump thread. A stale
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
 				this.#outputPump = new TtyWriter(1);
 				this.#pumpBacklogBound = 0;

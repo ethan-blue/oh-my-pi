@@ -4,12 +4,16 @@
 
 ### Added
 
+- Added exact-agent `task.agentRuntimeOverrides` for task and eval/workpool runs, including unlimited overrides and explicit-run limit precedence ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+
 - Added `ompg encoding doctor/init`, automatic read-only GBK fallback, and preferred `.ompg` project configuration with `.omp` compatibility ([#4](https://github.com/ethan-blue/oh-my-pi/issues/4)).
 
 - Added `outputEncoding` to local bash captures, including PTY, and eval's Python subprocess PIPE / JavaScript byte-write captures: pass `gbk` for CP936 or `utf8` for UTF-8-only decoding. Capture results report completed readers, mixed encodings, substitutions, and incomplete provenance without inventing a uniform encoding or zero loss.
 - Captured Python kernel fd-1 bytes with a persistent native decoder and an explicit kernel-scope label; late output and cross-cell fragments are no longer attributed to the next cell's stdout.
 
 ### Fixed
+
+- Kept all native project policies authoritative when refreshing task/retry configuration after a project config is created during a session ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
 
 - Preserved directories when Windows normalizes a terminal-dot `rmdir` operand; kept newly merged shell utilities and their regression fixtures compatible with Windows.
 - Waited for LSP mux children to exit on shutdown and finished disconnected sessions' document cleanup before reusing their server.

@@ -1,4 +1,4 @@
-# ompg v18.10.2-gbk.1
+# ompg v18.10.2-gbk.2
 
 基于 OMP v18.10.2 的 Windows x64（AVX2）GBK 支持分支，预发布。
 命令 ompg、用户目录 ~/.ompg 与原版 omp 分开。
@@ -10,11 +10,11 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
 ```
 
-默认安装到 %LOCALAPPDATA%\ompg\versions\18.10.2-gbk.1 并切换启动器。
+默认安装到 %LOCALAPPDATA%\ompg\versions\18.10.2-gbk.2 并切换启动器。
 自定义位置须加原来的 `-InstallDir "D:\Tools\ompg"`。
-新开终端执行 `ompg --version`，预期 ompg/18.10.2-gbk.1。
+新开终端执行 `ompg --version`，预期 ompg/18.10.2-gbk.2。
 旧版本保留；同版本不同字节拒绝覆盖。
-回退使用本版脚本加 `-Download -Version 18.9.0-gbk.1`，沿用原安装目录。
+回退使用本版脚本加 `-Download -Version 18.10.2-gbk.1`，沿用原安装目录。
 -NoPath 可禁止修改用户 PATH；-Uninstall 保留用户会话数据及非安装文件。
 
 ## 编码设置
@@ -56,3 +56,20 @@ agent 不能修改保护配置，但仍可修复 encoding.json。
 ompg update 禁用，从 ethan-blue/oh-my-pi Releases 手动升级。
 E630／Keil 工程、其他平台尚未验收；详见 Release 的 VALIDATION.md。
 包内 build-info.json 记录构建提交和原生模块哈希，SHA256SUMS.txt 校验文件。
+
+## 本版运行稳定性设置
+
+本版修复 Gemini CCA 别名历史签名、Windows 后台终端输出、stats 静默 worker 和按 agent 运行上限。精确范围与未验证场景见 RELEASE_NOTES.md、VALIDATION.md。
+
+可在工程 .ompg/config.yml 或 ompg config path 显示的用户设置中配置：
+
+```yaml
+task:
+  maxRuntimeMs: 600000
+  agentRuntimeOverrides:
+    worker: 1200000
+```
+
+worker 须替换成实际 agent 的精确名字；0 取消上限。显式 run 参数优先于此覆盖，然后才使用全局上限。
+
+herdr 桥接须单独从 https://github.com/ethan-blue/ompg-herdr-bridge 更新，Core ZIP 不自动替换扩展。每个 pane 仅一个集成报告方；真实 GUI 的全部闪烁原因尚未证明。

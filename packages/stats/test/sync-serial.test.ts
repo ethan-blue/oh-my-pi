@@ -9,6 +9,7 @@ import { installStatsTestIsolation } from "./helpers/temp-agent";
 installStatsTestIsolation("@pi-stats-sync-serial-");
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -47,6 +48,22 @@ async function writeSessionFile(options?: { includeCost?: boolean }): Promise<vo
 }
 
 describe("stats sync serial mode", () => {
+	it("releases the sync lock after a silent worker disappears and ingests on the next attempt", async () => {
+		await writeSessionFile();
+		const posted = Promise.withResolvers<void>();
+		const terminate = vi.fn();
+		const worker = { postMessage: () => posted.resolve(), terminate } as unknown as Worker;
+		const spawn = vi.spyOn(globalThis, "Worker").mockImplementation(() => worker);
+		const sync = syncAllSessions({ workers: 2, workerTimeoutMs: 10 });
+		const rejection = expect(sync).rejects.toThrow("Stats sync worker timed out");
+		await posted.promise;
+		await rejection;
+		expect(terminate).toHaveBeenCalledTimes(1);
+		spawn.mockRestore();
+		const retried = await syncAllSessions({ workers: 1 });
+		expect(retried.processed).toBe(1);
+		expect(getOverallStats().totalRequests).toBe(1);
+	});
 	it("honors workers: 1 without spawning a worker", async () => {
 		await writeSessionFile();
 		const workerSpy = vi.spyOn(globalThis, "Worker");

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded silent parser-worker waits so stats sync releases its lock and can recover on the next attempt; SDK sync callers can adjust `workerTimeoutMs` ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+
 ## [18.9.0] - 2026-10-11
 
 ### Fixed

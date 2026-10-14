@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Moved Windows terminal output onto the existing native writer thread so a slow terminal reader does not block input; preserved UTF-8 and bounded shutdown ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

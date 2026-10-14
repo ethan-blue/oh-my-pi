@@ -91,11 +91,19 @@ class "gemini" {
 	// Public Gemini requires the bypass sentinel on every unsigned call and
 	// supports function-part ids. Scope by adapter so custom providers using
 	// the same wire protocol inherit both contracts. The Cloud Code Assist
-	// first-call variant is a host contract in providers/.
+	// first-call variant belongs to the Cloud Code Assist request adapter.
 	on-api "google-generative-ai" {
 		revision ">=3" {
 			requires-skip-thought-signature #true
 			supports-function-part-id #true
+		}
+	}
+	// Every google-gemini-cli transport uses Cloud Code Assist, including
+	// custom provider aliases. Binding only canonical provider ids loses the
+	// signature bypass on fallback replay through those aliases (ompg #5).
+	on-api "google-gemini-cli" {
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
 		}
 	}
 	on "google-antigravity" "google-gemini-cli" {

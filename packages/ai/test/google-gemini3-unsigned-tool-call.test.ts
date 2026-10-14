@@ -85,6 +85,54 @@ function toolCallParts(model: Model<GoogleApi>, context: Context) {
 }
 
 describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
+	it("applies the Cloud Code Assist signature contract to a custom provider alias after fallback", () => {
+		const model = buildGeminiModel("google-gemini-cli", "my-cca", "gemini-3.8-flash");
+		const context = unsignedFirstCall("google-gemini-cli", "my-cca", model.id);
+		const prior = context.messages[1];
+		if (prior.role !== "assistant") throw new Error("Expected assistant fixture");
+		prior.api = "openai-completions";
+		prior.provider = "zhipu";
+		prior.model = "glm-5.3";
+		expect(toolCallParts(model, context)[0]?.thoughtSignature).toBe(SENTINEL);
+		const signed = toolCallParts(model, parallelToolCalls(model.api, model.provider, model.id));
+		expect(signed[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(signed[1]?.thoughtSignature).toBeUndefined();
+	});
+
+	it("does not replay an interrupted unsigned call or orphan its result in the next Gemini request", () => {
+		const model = buildGeminiModel("google-gemini-cli", "google-antigravity", "gemini-3.8-flash");
+		const context = unsignedFirstCall(model.api, model.provider, model.id);
+		const interrupted = context.messages[1];
+		if (interrupted.role !== "assistant") throw new Error("Expected assistant fixture");
+		interrupted.stopReason = "aborted";
+		context.messages.push({
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "grep",
+			content: [{ type: "text", text: "previous partial scan found main.c" }],
+			isError: false,
+			timestamp: 3000,
+		});
+		context.messages.push({ role: "user", content: "Continue safely", timestamp: 4000 });
+		const stored = JSON.stringify(context);
+		const parts = convertMessages(model, context).flatMap(content => content.parts ?? []);
+		expect(parts.some(part => part.functionCall || part.functionResponse)).toBe(false);
+		expect(parts.some(part => part.text === "previous partial scan found main.c")).toBe(true);
+		expect(JSON.stringify(context)).toBe(stored);
+	});
+
+	it("preserves signed-first parallel calls after interruption without inventing sibling signatures", () => {
+		const model = buildGeminiModel("google-gemini-cli", "google-antigravity", "gemini-3.8-flash");
+		const context = parallelToolCalls(model.api, model.provider, model.id);
+		const interrupted = context.messages[1];
+		if (interrupted.role !== "assistant") throw new Error("Expected assistant fixture");
+		interrupted.stopReason = "error";
+		const calls = toolCallParts(model, context);
+		expect(calls).toHaveLength(3);
+		expect(calls[0].thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(calls[1].thoughtSignature).toBeUndefined();
+	});
+
 	it("uses the sentinel only for an unsigned first call on Cloud Code Assist", () => {
 		for (const provider of ["google-antigravity", "google-gemini-cli"]) {
 			const model = buildGeminiModel("google-gemini-cli", provider, "gemini-3.7-flash");

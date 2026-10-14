@@ -12,6 +12,7 @@ import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
+import { cfgTaskAgentRuntimeOverrides } from "../../src/task/settings";
 import type { ToolSession } from "../../src/tools";
 
 const AGENT: AgentDefinition = {
@@ -185,6 +186,7 @@ describe("WorkPool dispatch", () => {
 
 	it("hands a queued batch to a follow-up turn after the first turn settles", async () => {
 		const session = makeSession([], 1);
+		cfgTaskAgentRuntimeOverrides.override(session.settings, { scout: 1_200_000 });
 		const first = Promise.withResolvers<void>();
 		const follow = Promise.withResolvers<void>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
@@ -205,6 +207,7 @@ describe("WorkPool dispatch", () => {
 		await until(() => followSpy.mock.calls.length === 1);
 		expect(workpool.batches.map(batch => batch.items.map(item => item.id))).toEqual([["handoff#1"], ["handoff#2"]]);
 		expect(followSpy.mock.calls[0]?.[0].workPoolYieldItems).toEqual([{ id: "handoff#2", index: 1 }]);
+		expect(followSpy.mock.calls[0]?.[0].maxRuntimeMs).toBe(1_200_000);
 		expect(followSpy.mock.calls[0]?.[0].message).toContain("After EACH item");
 		expect(followSpy.mock.calls[0]?.[0].message).not.toContain("todo");
 		follow.resolve();

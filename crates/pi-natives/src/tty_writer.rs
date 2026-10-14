@@ -20,6 +20,12 @@
 //! [`TtyWriter::dead`] and drops all queued output; the JS side maps that to
 //! its terminal-disconnected teardown.
 
+#[cfg(windows)]
+use std::{
+	fs::File,
+	io::Write,
+	os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+};
 use std::{
 	sync::{
 		Arc,
@@ -32,6 +38,17 @@ use std::{
 use napi::{Error, JsString, Result};
 use napi_derive::napi;
 use parking_lot::{Condvar, Mutex};
+#[cfg(windows)]
+use windows_sys::Win32::{
+	Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, INVALID_HANDLE_VALUE},
+	System::{
+		Console::{
+			GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetStdHandle, STD_ERROR_HANDLE,
+			STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleOutputCP,
+		},
+		Threading::GetCurrentProcess,
+	},
+};
 
 use crate::js;
 
@@ -52,10 +69,10 @@ struct Inner {
 /// incrementally. In particular, Terminal.app can stop draining a PTY when a
 /// large normal-screen history replay arrives as one multi-hundred-KiB write,
 /// leaving the writer blocked and every later frame queued behind it.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn write_all_with(
 	mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
 	buf: &[u8],
@@ -63,7 +80,17 @@ fn write_all_with(
 ) -> std::io::Result<()> {
 	let mut off = 0usize;
 	while off < buf.len() {
-		let end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
+		let mut end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
+		if cfg!(windows) && end < buf.len() {
+			// A console may decode each WriteFile independently. Never split a
+			// UTF-8 character between bounded ConPTY writes.
+			while end > off && buf[end] & 0xc0 == 0x80 {
+				end -= 1;
+			}
+			if end == off {
+				end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
+			}
+		}
 		match write(&buf[off..end]) {
 			Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
 			Ok(written) => {
@@ -120,8 +147,11 @@ fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Re
 	)
 }
 
-#[cfg(unix)]
-fn pump_loop(fd: i32, inner: &Inner) {
+#[cfg(any(unix, windows))]
+fn pump_loop(
+	mut write: impl FnMut(&[u8], &mut dyn FnMut(usize)) -> std::io::Result<()>,
+	inner: &Inner,
+) {
 	let mut front: Vec<u8> = Vec::new();
 	loop {
 		{
@@ -143,7 +173,7 @@ fn pump_loop(fd: i32, inner: &Inner) {
 			// watchdog and frame gate read a shrinking `pending()` as the sole
 			// liveness signal for a slow-but-alive terminal (#10430).
 			let mut written = 0usize;
-			let result = write_all(fd, &front, |n| {
+			let result = write(&front, &mut |n| {
 				written += n;
 				inner.pending.fetch_sub(n, Ordering::AcqRel);
 			});
@@ -163,6 +193,25 @@ fn pump_loop(fd: i32, inner: &Inner) {
 	}
 }
 
+#[cfg(any(unix, windows))]
+fn start_pump(
+	write: impl FnMut(&[u8], &mut dyn FnMut(usize)) -> std::io::Result<()> + Send + 'static,
+) -> Result<(Arc<Inner>, JoinHandle<()>)> {
+	let inner = Arc::new(Inner {
+		back:    Mutex::new(Vec::new()),
+		pending: AtomicUsize::new(0),
+		cv:      Condvar::new(),
+		stop:    AtomicBool::new(false),
+		dead:    AtomicBool::new(false),
+	});
+	let thread_inner = Arc::clone(&inner);
+	let thread = std::thread::Builder::new()
+		.name("tty-writer".into())
+		.spawn(move || pump_loop(write, &thread_inner))
+		.map_err(|err| Error::from_reason(format!("tty writer thread spawn failed: {err}")))?;
+	Ok((inner, thread))
+}
+
 /// Dedicated writer thread for one terminal fd.
 ///
 /// `dup(2)`'d at construction and closed on drop. The duplicate keeps the
@@ -178,8 +227,8 @@ pub struct TtyWriter {
 
 #[napi]
 impl TtyWriter {
-	/// Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-	/// when the descriptor cannot be duplicated.
+	/// Start a pump thread for `fd` (typically 1). Windows supports
+	/// stdout/stderr; when the descriptor cannot be duplicated.
 	#[napi(constructor)]
 	pub fn new(fd: i32) -> Result<Self> {
 		#[cfg(unix)]
@@ -192,24 +241,53 @@ impl TtyWriter {
 					std::io::Error::last_os_error()
 				)));
 			}
-			let inner = Arc::new(Inner {
-				back:    Mutex::new(Vec::new()),
-				pending: AtomicUsize::new(0),
-				cv:      Condvar::new(),
-				stop:    AtomicBool::new(false),
-				dead:    AtomicBool::new(false),
-			});
-			let thread_inner = Arc::clone(&inner);
-			let thread = std::thread::Builder::new()
-				.name("tty-writer".into())
-				.spawn(move || pump_loop(owned, &thread_inner))
-				.map_err(|err| Error::from_reason(format!("tty writer thread spawn failed: {err}")))?;
+			let (inner, thread) = match start_pump(move |buf, progress| {
+				write_all(owned, buf, progress)
+			}) {
+				Ok(pump) => pump,
+				Err(error) => {
+					// SAFETY: thread creation failed; no pump owns this duplicate.
+					unsafe { libc::close(owned) };
+					return Err(error);
+				},
+			};
 			Ok(Self { inner, thread: Some(thread), fd: owned })
 		}
-		#[cfg(not(unix))]
+		#[cfg(windows)]
+		{
+			let which = match fd {
+				1 => STD_OUTPUT_HANDLE,
+				2 => STD_ERROR_HANDLE,
+				_ => return Err(Error::from_reason("Windows TtyWriter supports fd 1 or 2")),
+			};
+			// SAFETY: borrowed standard handle is validated and duplicated into
+			// this process; no ownership of the original is transferred.
+			let original = unsafe { GetStdHandle(which) };
+			// SAFETY: GetCurrentProcess takes no parameters and returns a borrowed
+			// pseudo-handle.
+			let process = unsafe { GetCurrentProcess() };
+			let mut owned = std::ptr::null_mut();
+			if original.is_null()
+				|| original == INVALID_HANDLE_VALUE
+				// SAFETY: valid borrowed source/process handles and a writable out-pointer.
+				|| unsafe {
+					DuplicateHandle(process, original, process, &mut owned, 0, 0, DUPLICATE_SAME_ACCESS)
+				} == 0
+			{
+				return Err(Error::from_reason(format!(
+					"stdout/stderr handle duplication failed: {}",
+					std::io::Error::last_os_error()
+				)));
+			}
+			// SAFETY: DuplicateHandle returned a fresh owned handle. The worker's
+			// File closes it after exit, even when bounded stop detaches the
+			// thread.
+			Self::from_windows_file(File::from(unsafe { OwnedHandle::from_raw_handle(owned) }))
+		}
+		#[cfg(not(any(unix, windows)))]
 		{
 			let _ = fd;
-			Err(Error::from_reason("TtyWriter is unix-only"))
+			Err(Error::from_reason("TtyWriter is unavailable on this platform"))
 		}
 	}
 
@@ -321,9 +399,142 @@ impl TtyWriter {
 	}
 }
 
+#[cfg(windows)]
+impl TtyWriter {
+	fn from_windows_file(mut file: File) -> Result<Self> {
+		let (inner, thread) = start_pump(move |buf, progress| {
+			write_all_with(
+				|chunk| {
+					let mut mode = 0;
+					// Console APIs and blocking writes stay on the pump, never JS.
+					// Pipes retain byte semantics and do not alter
+					// the parent console codepage. SAFETY: file owns
+					// the handle for this entire pump invocation.
+					unsafe {
+						if GetConsoleMode(file.as_raw_handle(), &mut mode) != 0 {
+							let output_cp = GetConsoleOutputCP();
+							if output_cp != 0 && output_cp != 65001 {
+								SetConsoleOutputCP(65001);
+							}
+							let input_cp = GetConsoleCP();
+							if input_cp != 0 && input_cp != 65001 {
+								SetConsoleCP(65001);
+							}
+						}
+					}
+					file.write(chunk)
+				},
+				buf,
+				progress,
+			)
+		})?;
+		Ok(Self { inner, thread: Some(thread) })
+	}
+}
+
 impl Drop for TtyWriter {
 	fn drop(&mut self) {
 		self.stop(0);
+	}
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+	use std::io::Read;
+
+	use windows_sys::Win32::System::Pipes::CreatePipe;
+
+	use super::*;
+
+	fn pipe_pair() -> (File, File) {
+		let mut read = std::ptr::null_mut();
+		let mut write = std::ptr::null_mut();
+		// SAFETY: valid out-pointers; non-inheritable test-owned anonymous pipe.
+		assert_ne!(unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 4096) }, 0);
+		// SAFETY: CreatePipe returned two fresh handles; File owns and closes
+		// them.
+		unsafe {
+			(
+				File::from(OwnedHandle::from_raw_handle(read)),
+				File::from(OwnedHandle::from_raw_handle(write)),
+			)
+		}
+	}
+
+	fn push(writer: &TtyWriter, bytes: &[u8]) {
+		writer.append(|back| {
+			back.extend_from_slice(bytes);
+			bytes.len()
+		});
+	}
+
+	#[test]
+	fn windows_full_pipe_does_not_block_enqueue_and_preserves_unicode_fifo() {
+		let (mut read, write) = pipe_pair();
+		let mut writer = TtyWriter::from_windows_file(write).unwrap();
+		let payload = "汉字🙂\n".repeat(50_000);
+		let started = Instant::now();
+		push(&writer, b"prefix\n");
+		push(&writer, payload.as_bytes());
+		assert!(started.elapsed() < Duration::from_millis(200), "enqueue blocked on a full pipe");
+		assert!(writer.pending() > 0);
+		let reader = std::thread::spawn(move || {
+			let mut bytes = Vec::new();
+			read.read_to_end(&mut bytes).unwrap();
+			bytes
+		});
+		assert!(writer.flush_sync(5_000));
+		assert!(!writer.dead());
+		assert_eq!(writer.pending(), 0);
+		writer.stop(1_000);
+		assert_eq!(reader.join().unwrap(), [b"prefix\n".as_slice(), payload.as_bytes()].concat());
+	}
+
+	#[test]
+	fn windows_broken_pipe_marks_dead_and_discards_pending_output() {
+		let (read, write) = pipe_pair();
+		drop(read);
+		let mut writer = TtyWriter::from_windows_file(write).unwrap();
+		push(&writer, &vec![b'x'; 100_000]);
+		assert!(writer.flush_sync(2_000));
+		assert!(writer.dead());
+		assert_eq!(writer.pending(), 0);
+		writer.stop(0);
+	}
+
+	#[test]
+	fn windows_stalled_pipe_stop_is_bounded_and_releases_handle_after_drain() {
+		let (mut read, write) = pipe_pair();
+		let mut writer = TtyWriter::from_windows_file(write).unwrap();
+		let payload = vec![b'x'; 256 * 1024];
+		push(&writer, &payload);
+		let started = Instant::now();
+		writer.stop(10);
+		assert!(started.elapsed() < Duration::from_millis(200), "stop joined a blocked writer");
+		let mut received = Vec::new();
+		read.read_to_end(&mut received).unwrap();
+		assert_eq!(received, payload);
+	}
+
+	#[test]
+	fn windows_bounded_writes_do_not_split_utf8_characters() {
+		let payload = "汉字🙂".repeat(10_000);
+		let mut received = Vec::new();
+		write_all_with(
+			|chunk| {
+				assert!(chunk.len() <= MAX_TTY_WRITE_CHUNK_BYTES);
+				assert!(
+					std::str::from_utf8(chunk).is_ok(),
+					"UTF-8 character split between console writes"
+				);
+				received.extend_from_slice(chunk);
+				Ok(chunk.len())
+			},
+			payload.as_bytes(),
+			|_| {},
+		)
+		.unwrap();
+		assert_eq!(received, payload.as_bytes());
 	}
 }
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Applied the Gemini 3 Cloud Code Assist signature bypass to custom provider aliases when replaying fallback tool calls ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

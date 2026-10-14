@@ -19,6 +19,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { $ } from "bun";
+import { DISTRIBUTION_VERSION } from "@oh-my-pi/pi-utils";
 import { version as upstreamVersion } from "../packages/utils/package.json" with { type: "json" };
 
 const args = process.argv.slice(2);
@@ -30,7 +31,7 @@ function argValue(name: string): string | undefined {
 }
 
 const root = import.meta.dir.replace(/[/\\]scripts$/, "");
-const version = argValue("version") ?? `${upstreamVersion}-gbk.1`;
+const version = argValue("version") ?? DISTRIBUTION_VERSION;
 if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(version)) throw new Error("Invalid release version");
 const staging = path.join(root, "release-staging", version);
 const sha = argValue("sha") ?? (await $`git rev-parse HEAD`.cwd(root).quiet().text()).trim();

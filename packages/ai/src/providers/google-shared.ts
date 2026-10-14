@@ -161,6 +161,7 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
+	const discardedToolCallIds = new Set<string>();
 
 	const normalizeToolCallId = (id: string): string => {
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
@@ -180,7 +181,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	};
 
 	for (const msg of transformedMessages) {
-		if (msg.role !== "toolResult") flushPendingToolImages();
+		if (msg.role !== "toolResult") {
+			flushPendingToolImages();
+			discardedToolCallIds.clear();
+		}
 		if (msg.role === "user" || msg.role === "developer") {
 			if (typeof msg.content === "string") {
 				// Skip empty user messages
@@ -219,6 +223,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
 			const dropsUnsignedThinking = model.compat.dropUnsignedThinking;
 			let isFirstToolCall = true;
+			const firstCall = msg.content.find((block): block is ToolCall => block.type === "toolCall");
+			// An interrupted turn never completed the provider's signing boundary.
+			// Do not synthesize a bypass for that unfinished function-call group.
+			// A genuinely signed first call still covers its parallel siblings.
+			const discardInterruptedCalls =
+				(msg.stopReason === "aborted" || msg.stopReason === "error") &&
+				(model.compat.requiresSkipThoughtSignature ||
+					model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall) &&
+				firstCall !== undefined &&
+				!resolveThoughtSignature(isSameProviderAndModel, firstCall.thoughtSignature);
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -249,6 +263,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						});
 					}
 				} else if (block.type === "toolCall") {
+					if (discardInterruptedCalls) {
+						discardedToolCallIds.add(block.id);
+						continue;
+					}
 					emittedToolCallNames.set(block.id, block.name);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
@@ -307,6 +325,13 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						: "";
 
 			const imageParts = imageContent.map(convertGoogleImagePart);
+			if (discardedToolCallIds.has(msg.toolCallId)) {
+				// Preserve observations as plain user content, not an orphaned
+				// functionResponse. Stored session history is left untouched.
+				const parts: Part[] = [...(responseValue ? [{ text: responseValue }] : []), ...imageParts];
+				if (parts.length > 0) contents.push({ role: "user", parts });
+				continue;
+			}
 
 			const includeId = model.compat.supportsFunctionPartId;
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);

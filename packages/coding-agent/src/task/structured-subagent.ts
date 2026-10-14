@@ -71,6 +71,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
+	resolveTaskMaxRuntimeMs,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -579,7 +580,7 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		maxRuntimeMs: request.maxRuntimeMs,
+		maxRuntimeMs: resolveTaskMaxRuntimeMs(session.settings, policy.agentName, request.maxRuntimeMs),
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
