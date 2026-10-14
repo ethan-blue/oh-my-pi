@@ -5,6 +5,11 @@
 ### Fixed
 
 - Bounded silent parser-worker waits so stats sync releases its lock and can recover on the next attempt; SDK sync callers can adjust `workerTimeoutMs` ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
+- Usage recorded at $0 for a model whose catalog price changes on a date (Gemini 4 Argon, Devin SWE-2) is now priced at the rate in force on the request's date, instead of staying $0 like peak/off-peak tariff usage ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.9.0] - 2026-10-11
 

@@ -48,7 +48,7 @@ export const MAIN_CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
 export const VERSION: string = version;
 
 /** Fork release version: `<upstream base>-<fork suffix>` (e.g. "18.8.4-gbk.1"). */
-export const DISTRIBUTION_VERSION: string = `${version}-gbk.2`;
+export const DISTRIBUTION_VERSION: string = `${version}-gbk.1`;
 
 /** Default User-Agent header string (e.g. "ompg/18.8.4-gbk.1") */
 export const USER_AGENT = `ompg/${DISTRIBUTION_VERSION}`;

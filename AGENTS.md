@@ -1,5 +1,14 @@
 # Development Rules
 
+## ompg Fork Upstream Maintenance
+
+- Before each modification round, inspect git status/diff and query the latest official stable release of `can1357/oh-my-pi`. "Latest OMP version" means the latest non-draft, non-prerelease tag, unless the user explicitly requests main or a prerelease.
+- After completing changes, check the latest stable release again. Merge that exact upstream tag into the working fork branch, resolve conflicts preserving both upstream functionality and ompg GBK/Hashline, `.ompg` priority/`.omp` compatibility, runtime overrides and fork isolation. If a newer stable release appears before publishing, repeat the merge and affected validation.
+- A matching package version is insufficient: the verified upstream release commit must be an ancestor of the delivery commit. Record both SHAs and the checked release time in the handoff.
+- Regenerate conflicting generated files through their official generators. Run `bun check`, relevant GBK/output/task/config tests, and `build:native`/`test:rs` when Rust changes. Keep failures, skips and environment blockers separate.
+- Do not deliver stale-base changes as final. If upstream lookup/merge is blocked, preserve work and report the specific blocker rather than claim latest-version compatibility.
+- New release bytes require a new version/tag; preserve prior assets. Publish from a clean commit, validate the actual EXE, install/rollback and downloaded checksums. Bridge deployment is separate from the Core package; verify its installed file and actual discovery path.
+
 ## Default Context
 
 This repo contains multiple packages, but **`packages/coding-agent/`** is the primary focus. Unless otherwise specified, assume work refers to this package.

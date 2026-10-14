@@ -41,6 +41,18 @@ if (dirty) {
 	process.exit(1);
 }
 
+// A release must contain the current official stable base, not merely a
+// matching version string. gh owns authentication; no credentials are read.
+const latestTag = (await $`gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name`.quiet().text()).trim();
+if (latestTag !== `v${upstreamVersion}`) {
+	throw new Error(`Merge latest official OMP ${latestTag} before packaging (current base ${upstreamVersion}).`);
+}
+const upstreamCommitSha = (await $`gh api repos/can1357/oh-my-pi/commits/${latestTag} --jq .sha`.quiet().text()).trim();
+if (!/^[a-f0-9]{40}$/.test(upstreamCommitSha)) throw new Error("Invalid upstream release commit");
+const upstreamMerged = await $`git merge-base --is-ancestor ${upstreamCommitSha} HEAD`.cwd(root).quiet().nothrow();
+if (upstreamMerged.exitCode !== 0) throw new Error(`Latest official OMP commit ${upstreamCommitSha} is not merged.`);
+const upstreamCheckedAt = new Date().toISOString();
+
 const exeSource = path.join(root, "packages", "coding-agent", "dist", "omp.exe");
 const addonPath = path.join(root, "packages", "natives", "native", "pi_natives.win32-x64-modern.node");
 for (const required of [exeSource, addonPath, path.join(root, "scripts", "install-ompg.ps1")]) {
@@ -79,6 +91,8 @@ const buildInfo = {
 	upstreamRepository: "can1357/oh-my-pi",
 	version,
 	upstreamBaseVersion: upstreamVersion,
+	upstreamCommitSha,
+	upstreamCheckedAt,
 	commitSha: sha,
 	platform: "windows-x64",
 	bunVersion,

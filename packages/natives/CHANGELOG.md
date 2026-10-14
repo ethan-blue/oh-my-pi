@@ -14,6 +14,12 @@
 - Withheld PTY uniform encoding and substitution totals after cancellation, reader failure, failed forwarding or incomplete draining.
 - Applied encoding include rules to new files and rejected Python source encoding conflicts before editing ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
 - Rejected invalid UTF-8 or GBK search input instead of returning replacement-character matches ([#3](https://github.com/ethan-blue/oh-my-pi/issues/3)).
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
+- Fixed `pwsh` code blocks rendering without PowerShell syntax colors ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

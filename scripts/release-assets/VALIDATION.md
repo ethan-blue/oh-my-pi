@@ -1,38 +1,23 @@
-# ompg v18.10.2-gbk.2 验收记录
+# ompg v18.10.4-gbk.1 验收记录
 
-Windows x64 AVX2，未签名预发布；Bun 1.4.2，Rust nightly-2026-10-06 / MSVC。
-上游基线 OMP v18.10.2；本轮不合并新的上游 main，旧 gbk.1 标签与资产保留。源码与实际 addon/EXE 身份见 build-info.json、包内 SHA256SUMS.txt。
+上游正式版 v18.10.4，提交 687892d1046ecaf18829b45f5b86928a308258f4；Bun 1.4.2 / Windows x64 AVX2 / Rust nightly-2026-10-06 / MSVC。
+本版结果均在合并后执行，旧 gbk.2 结果不代替新门禁。包内 build-info.json 记录实际源码、上游提交/检查时间、native 哈希和构建工具。
 
-## Core 本轮门禁
+| 检查 | 实测 |
+| --- | --- |
+| native | 官方优化构建退出 0，146 exports；既有 LNK4217 warning 保留 |
+| Rust 全仓 | 3210 passed / 4 skipped，退出 0；doctest 1 passed |
+| bun check | 退出 0：lint/fmt/workspace types/cargo fmt/clippy -D warnings |
+| 最终 native 下 GBK + ptree | 173 passed / 0 failed，591 assertions，10 文件 |
+| task/stats/Gemini/KDL 定向 | 251 passed / 0 failed，1139 assertions，36 文件 |
+| 审批/AST/ACP write/设置重载/bash renderer | 114 passed / 1 skipped / 0 failed，450 assertions，5 文件 |
+| bridge 真 socket 回归 | 6 passed / 0 failed，11 assertions |
+| bridge 本机安装/发现 | 安装字节匹配源码，实际 native extension discovery 只找到一个 ~/.ompg bridge |
+| git diff --check | 退出 0，无未解决冲突 |
 
-| 检查 | 实测 | 范围 |
-| --- | --- | --- |
-| native 优化构建 | 退出 0，146 exports | Windows；既有 LNK4217 warning 保留 |
-| Rust 全仓 | 3209 passed / 4 skipped，退出 0 | 34 binaries；doctest 1 passed |
-| bun check | 退出 0 | lint/fmt/workspace typecheck/cargo fmt/clippy -D warnings |
-| Google/factory 最终全量 | 407 passed / 0 failed，1245 assertions | 31 文件；包括别名签名、中断历史与并行调用合同 |
-| KDL/兼容性定向 | 83 passed / 0 failed，211 assertions | 编译、级联、分类与 bundled model parity；与全量有覆盖重叠 |
-| task/config 相邻 | 559 passed / 2 skipped / 1 failed，2272 assertions | 52 文件；单个 symlink EPERM 为 ENVIRONMENT BLOCKED，整套非 PASS |
-| task runtime 定向最终 | 51 passed / 0 failed，164 assertions | structured 与 workpool，显式参数/按 agent/全局优先级 |
-| stats/TUI 相邻 | 211 passed / 0 failed，984 assertions | 34 文件，含静默 worker 后续真实入库、write-phase 与 LoopWatchdog |
-| GBK 九文件 + ptree-stderr | 173 passed / 0 failed，591 assertions | 10 文件；上一版编码/搜索/来源合同未退化 |
-| Windows NAPI writer | PASS，实际 220000 bytes 原样输出 | constructor、Unicode FIFO、drain、stop；不等于 ConPTY GUI 性能证明 |
-| bridge 离线真实 socket | 6 passed / 0 failed，11 assertions | 独立仓库 3a74e1885ed2005b8d8dbb3ba7c7083b52e58c83 |
-| git diff --check | 退出 0 | 保留既有环境阻塞测试 |
+native SHA256：8213931d68082632237a5de6afb28c57c72124607261d128025fb46e2e7800d5。
+bridge 提交：1a5a3ff723ac545f6d3ee637894ea6559f3b0084；安装文件 SHA256：ac7822bfb2334dfe599e92370b4e5a5e6838b6d90c4423fbabb1d78d4f1d067a。
 
-native SHA256：a52a914ac9b8e12a7457d2c863a79027d266ca710e359ba04c886f880f252484。
-各套件有重叠，不能将表内 passed 相加作为独立总数。
+发行流程另执行实际 EXE version/smoke/doctor、fork updater 阻断、隔离真 EXE 升级/回退、下载内外 SHA 清单与公开安装探针，最终证据写入 38 号交付记录。源代码结果不能冒充远程下载证明。
 
-## 发布验收
-
-发布流程使用官方 binary build、--version、--smoke-test、encoding doctor JSON、fork update 阻断和隔离安装器升级/回退。ZIP 包内/外哈希及 GitHub 下载后复核单独记录在 docs/gbk-handoff 的本版最终发布文档；本表的源代码结果不冒充远程发布证明。
-
-## 未验证与不通过
-
-- 原机日志不可访问；真实 Gemini 400、41.425 秒 stall、stats 停更、herdr GUI/多实例现象未原机复现。用户允许无法访问的项不改；关闭跟踪 issue 不表示所有症状根治。
-- Windows worktree symlink EPERM 为环境阻塞；未换 hardlink、删除断言或修改权限制造通过。
-- Unix、真实 E630/Keil/模型、ConPTY GUI 与完整性能 A/B 未验证。
-- bridge 更新独立于 Core ZIP，不自动迁移或删除用户扩展。
-- GBK 自动推断只读；外部程序、扩展和可信 build hook 不受 Core 全局文件编码拦截保证。
-
-详细文件、因果与边界：docs/gbk-handoff/36-issue5-implementation-and-verification.md。
+未验证：用户当前 herdr pane 的重载与 GUI、原机日志症状、非默认 profile、Unix/E630/ConPTY A/B。原有 Windows symlink EPERM 保持环境阻塞，本轮未更改权限、链接类型或断言；表中 1 skipped 不计通过。保护模式不是 OS 沙箱，GB18030 不支持。

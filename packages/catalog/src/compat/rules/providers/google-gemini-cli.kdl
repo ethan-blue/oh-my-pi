@@ -2,5 +2,6 @@
 
 provider "google-gemini-cli" {
 	default-model "gemini-3.1-pro-preview"
+	image-count-budget 200
 
 }
