@@ -4,6 +4,7 @@ import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
+import memorySummaryPending from "../prompts/internal-urls/memory-summary-pending.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import {
@@ -137,7 +138,7 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
 		throw new Error(`memory:// URL must resolve to a file or directory: ${url.href}`);
 	}
 
-	const content = await Bun.file(realTargetPath).text();
+	const content = await fs.readFile(realTargetPath, "utf8");
 
 	return {
 		url: url.href,
@@ -455,6 +456,19 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			}
 			const result = await tryResolveInRoot(url, root);
 			if (result) return result;
+		}
+
+		// A missing default summary is a normal pre-consolidation state for an
+		// explicitly local caller. Keep arbitrary missing files and legacy callers
+		// on their existing error paths, and never manufacture a backing file.
+		if (backend === "local" && resolveMemoryUrlToPath(url, roots[0]) === path.join(roots[0], DEFAULT_MEMORY_FILE)) {
+			return {
+				url: url.href,
+				content: memorySummaryPending,
+				contentType: "text/markdown",
+				size: Buffer.byteLength(memorySummaryPending),
+				notes: [],
+			};
 		}
 
 		if (!anyExists) {

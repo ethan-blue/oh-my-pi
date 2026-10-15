@@ -153,6 +153,27 @@ describe("discoverAgents", () => {
 		expect(projectAgentsDir).toBe(path.join(projectDir, ".omp", "agents"));
 	});
 
+	test("prefers a nested legacy agent directory over parent ompg, then prefers ompg at the same root", async () => {
+		const nested = path.join(projectDir, "nested");
+		for (const [dir, marker] of [
+			[path.join(projectDir, ".ompg", "agents"), "PARENT_AGENT"],
+			[path.join(nested, ".omp", "agents"), "NESTED_LEGACY_AGENT"],
+		] as const) {
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(path.join(dir, "omp-test-agent.md"), `${OMP_AGENT_MD}\n${marker}\n`);
+		}
+		const legacy = await discoverAgents(nested, tempHome);
+		expect(legacy.agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain(
+			"NESTED_LEGACY_AGENT",
+		);
+		const preferred = path.join(nested, ".ompg", "agents");
+		await fs.mkdir(preferred, { recursive: true });
+		await fs.writeFile(path.join(preferred, "omp-test-agent.md"), `${OMP_AGENT_MD}\nPREFERRED_AGENT\n`);
+		const current = await discoverAgents(nested, tempHome);
+		expect(current.agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain("PREFERRED_AGENT");
+		expect(current.projectAgentsDir).toBe(preferred);
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.ompg/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

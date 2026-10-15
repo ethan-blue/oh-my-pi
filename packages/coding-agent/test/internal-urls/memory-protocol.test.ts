@@ -74,6 +74,57 @@ function createGlobTool(cwd: string): GlobTool {
 }
 
 describe("MemoryProtocolHandler", () => {
+	it.skipIf(process.platform !== "win32")(
+		"reads an existing summary beyond the Windows legacy path limit instead of reporting it pending",
+		async () => {
+			await withMemoryFixture(async ({ cwd, agentDir }) => {
+				const project = path.join(cwd, "nested-project-".repeat(8));
+				const root = getMemoryRoot(agentDir, project);
+				const summaryPath = path.join(root, "memory_summary.md");
+				expect(summaryPath.length).toBeGreaterThan(260);
+				await fs.mkdir(root, { recursive: true });
+				await fs.writeFile(summaryPath, "LONG_PATH_SUMMARY", "utf8");
+				const resource = await InternalUrlRouter.instance().resolve("memory://root", {
+					cwd: project,
+					settings: Settings.isolated({ "memory.backend": "local" }),
+				});
+				expect(resource.content).toBe("LONG_PATH_SUMMARY");
+				expect(resource.sourcePath).toBeDefined();
+			});
+		},
+	);
+
+	it("reads a pending summary without creating a file, then sees the generated summary", async () => {
+		await withMemoryFixture(async ({ cwd, memoryRoot }) => {
+			const tool = new ReadTool({
+				cwd,
+				hasUI: false,
+				settings: Settings.isolated({ "memory.backend": "local" }),
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+			});
+			for (const url of ["memory://root", "memory://root/memory_summary.md"]) {
+				const result = await tool.execute("pending-summary", { path: url });
+				expect(result.content).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({ type: "text", text: expect.stringContaining("not yet available") }),
+					]),
+				);
+			}
+			expect(await Bun.file(path.join(memoryRoot, "memory_summary.md")).exists()).toBe(false);
+			await Bun.write(path.join(memoryRoot, "memory_summary.md"), "GENERATED_SUMMARY_AFTER_PENDING");
+			const result = await tool.execute("generated-summary", { path: "memory://root" });
+			expect(result.content).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: "text",
+						text: expect.stringContaining("GENERATED_SUMMARY_AFTER_PENDING"),
+					}),
+				]),
+			);
+		});
+	});
+
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		InternalUrlRouter.resetForTests();
@@ -899,7 +950,7 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 		}
 	});
 
-	it("keeps the 'run a session' message for local backend before consolidation writes the root", async () => {
+	it("reports pending consolidation without creating a local memory root", async () => {
 		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-protocol-11909-local-"));
 		const previousAgentDir = getAgentDir();
 		try {
@@ -907,9 +958,10 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 			const cwd = path.join(cleanupRoot, "project");
 			await fs.mkdir(cwd, { recursive: true });
 			const settings = Settings.isolated({ "memory.backend": "local" });
-			await expect(InternalUrlRouter.instance().resolve("memory://root", { cwd, settings })).rejects.toThrow(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			const resource = await InternalUrlRouter.instance().resolve("memory://root", { cwd, settings });
+			expect(resource.content).toContain("not yet available");
+			expect(resource.sourcePath).toBeUndefined();
+			await expect(fs.stat(getMemoryRoot(getAgentDir(), cwd))).rejects.toMatchObject({ code: "ENOENT" });
 		} finally {
 			setAgentDir(previousAgentDir);
 			await removeWithRetries(cleanupRoot);

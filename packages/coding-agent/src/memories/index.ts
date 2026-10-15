@@ -188,25 +188,20 @@ const memoryToolDeveloperInstructionsBySession = new WeakMap<
 >();
 const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
 
-function getMemoryInstructionRoot(agentDir: string, settings: Settings): string {
-	return getMemoryRoot(agentDir, settings.getCwd());
-}
-
 function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
 	return session.sessionManager.getSessionFile() ?? undefined;
 }
 
 async function readMemoryToolDeveloperInstructionsSnapshot(
-	agentDir: string,
+	memoryRoot: string,
 	settings: Settings,
 ): Promise<MemoryToolDeveloperInstructionsSnapshot | undefined> {
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
-	const memoryRoot = getMemoryInstructionRoot(agentDir, settings);
 
 	let summary = "";
 	try {
-		summary = (await Bun.file(path.join(memoryRoot, "memory_summary.md")).text()).trim();
+		summary = (await fs.readFile(path.join(memoryRoot, "memory_summary.md"), "utf8")).trim();
 	} catch {
 		// Missing or unreadable summary — injection is best-effort; fall through
 		// so any captured lessons still surface on their own.
@@ -227,18 +222,13 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	const summaryOut = snapshot.summary
 		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
 		: "";
-	// Lessons share ONE injection budget with the summary so the combined block
-	// stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
-	// truncateByApproxTokens). With no summary, lessons get the whole budget.
-	// Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
-	// can exceed `limit * 4` chars and drive the remainder negative — when the
-	// summary already fills the budget, lessons are simply dropped.
-	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
-	const learnedOut =
-		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
+	// Durable rules must not disappear when the consolidated summary fills its
+	// budget. readLearnedLessons already sanitizes and redacts the full file.
+	const learnedOut = snapshot.learned;
 	if (!summaryOut && !learnedOut) return undefined;
 
 	return prompt.render(readPathTemplate, {
+		has_summary: Boolean(snapshot.summary),
 		memory_summary: summaryOut,
 		learned: learnedOut,
 	});
@@ -277,14 +267,15 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
 	agentDir: string,
+	cwd: string,
 	settings: Settings,
 ): Promise<void> {
 	if (memoryConversationStarted(session)) return;
 	const sessionFile = getMemoryInstructionSessionFile(session);
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
-	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const root = getMemoryRoot(agentDir, cwd);
+	const current = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	if (memoryConversationStarted(session)) return;
-	const root = getMemoryInstructionRoot(agentDir, settings);
 	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
 	const learned = cachedLearned ?? baseline?.learned ?? "";
@@ -294,15 +285,21 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 
 /**
  * Build memory usage instructions for prompt injection.
+ *
+ * `cwd` is the session's project directory, the same scope consolidation and
+ * `learn` write to; never `settings.getCwd()`, which an embedding host may pin
+ * to one directory for sessions spanning several projects.
  */
 export async function buildMemoryToolDeveloperInstructions(
 	agentDir: string,
+	cwd: string,
 	settings: Settings,
 	session?: MemoryInstructionSession,
 ): Promise<string | undefined> {
+	const root = getMemoryRoot(agentDir, cwd);
 	if (!session) {
-		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
-		memoryToolDeveloperInstructionsByRoot.set(getMemoryInstructionRoot(agentDir, settings), snapshot);
+		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
+		memoryToolDeveloperInstructionsByRoot.set(root, snapshot);
 		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
@@ -310,7 +307,7 @@ export async function buildMemoryToolDeveloperInstructions(
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
 	if (cached && cached.sessionFile === sessionFile) return cached.value;
 
-	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
@@ -358,7 +355,12 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	await runPhase2(options);
 	if (!isMemoryStartupActive(options)) return;
-	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
+	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+		options.session,
+		options.agentDir,
+		options.session.sessionManager.getCwd(),
+		options.settings,
+	);
 	if (!isMemoryStartupActive(options)) return;
 	if (memoryConversationStarted(options.session)) return;
 	await options.session.refreshBaseSystemPrompt?.();
@@ -943,7 +945,7 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 		const body = [`thread_id: ${row.threadId}`, `updated_at: ${row.sourceUpdatedAt}`, "", row.rolloutSummary].join(
 			"\n",
 		);
-		await Bun.write(path.join(summariesDir, filename), `${body.trim()}\n`);
+		await fs.writeFile(path.join(summariesDir, filename), `${body.trim()}\n`, "utf8");
 	}
 
 	const currentFiles = await fs.readdir(summariesDir).catch(() => [] as string[]);
@@ -954,7 +956,7 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 	}
 
 	const rawBody = buildRawMemoriesMarkdown(outputs);
-	await Bun.write(path.join(memoryRoot, "raw_memories.md"), rawBody);
+	await fs.writeFile(path.join(memoryRoot, "raw_memories.md"), rawBody, "utf8");
 }
 
 async function cleanupConsolidatedArtifacts(memoryRoot: string): Promise<void> {
@@ -983,9 +985,7 @@ async function readRolloutSummaries(memoryRoot: string): Promise<string> {
 
 	const blocks: string[] = [];
 	for (const name of summaryNames) {
-		const text = await Bun.file(path.join(summariesDir, name))
-			.text()
-			.catch(() => "");
+		const text = await fs.readFile(path.join(summariesDir, name), "utf8").catch(() => "");
 		if (!text.trim()) continue;
 		blocks.push(`--- ${name} ---\n${text.trim()}`);
 	}
@@ -1011,7 +1011,7 @@ async function runConsolidationModel(options: {
 	}>;
 }> {
 	const { memoryRoot, model, apiKey } = options;
-	const rawMemories = await Bun.file(path.join(memoryRoot, "raw_memories.md")).text();
+	const rawMemories = await fs.readFile(path.join(memoryRoot, "raw_memories.md"), "utf8");
 	const rolloutSummaries = await readRolloutSummaries(memoryRoot);
 	const input = prompt.render(consolidationTemplate, {
 		raw_memories: truncateByApproxTokens(rawMemories, 20_000),
@@ -1094,8 +1094,9 @@ async function applyConsolidation(
 		}>;
 	},
 ): Promise<void> {
-	await Bun.write(path.join(memoryRoot, "MEMORY.md"), `${consolidated.memoryMd.trim()}\n`);
-	await Bun.write(path.join(memoryRoot, "memory_summary.md"), `${consolidated.memorySummary.trim()}\n`);
+	await fs.mkdir(memoryRoot, { recursive: true });
+	await fs.writeFile(path.join(memoryRoot, "MEMORY.md"), `${consolidated.memoryMd.trim()}\n`, "utf8");
+	await fs.writeFile(path.join(memoryRoot, "memory_summary.md"), `${consolidated.memorySummary.trim()}\n`, "utf8");
 	const skillsDir = path.join(memoryRoot, "skills");
 	await fs.mkdir(skillsDir, { recursive: true });
 	const keep = new Set<string>();
@@ -1116,7 +1117,9 @@ async function applyConsolidation(
 		}
 
 		for (const [relativePath, content] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-			await Bun.write(path.join(dir, ...relativePath.split("/")), content);
+			const filePath = path.join(dir, ...relativePath.split("/"));
+			await fs.mkdir(path.dirname(filePath), { recursive: true });
+			await fs.writeFile(filePath, content, "utf8");
 		}
 
 		const keepFiles = new Set(files.keys());
@@ -1473,7 +1476,7 @@ export async function saveLearnedLesson(
 async function appendLearnedLine(filePath: string, line: string): Promise<void> {
 	let existing = "";
 	try {
-		existing = await Bun.file(filePath).text();
+		existing = await fs.readFile(filePath, "utf8");
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 	}
@@ -1501,7 +1504,8 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 			lessonCount--;
 		}
 	}
-	await Bun.write(filePath, `${out.join("\n")}\n`);
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await fs.writeFile(filePath, `${out.join("\n")}\n`, "utf8");
 }
 
 /**
@@ -1512,7 +1516,7 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 async function readLearnedLessons(memoryRoot: string): Promise<string> {
 	let raw = "";
 	try {
-		raw = (await Bun.file(path.join(memoryRoot, LEARNED_LESSONS_FILE)).text()).trim();
+		raw = (await fs.readFile(path.join(memoryRoot, LEARNED_LESSONS_FILE), "utf8")).trim();
 	} catch {
 		return "";
 	}

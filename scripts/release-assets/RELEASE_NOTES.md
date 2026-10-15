@@ -1,35 +1,26 @@
-# ompg v18.10.4-gbk.1（Windows x64 预发布）
+# ompg v18.11.0-gbk.1（Windows x64 预发布）
 
-完整合并 OMP 官方最新正式版 v18.10.4（检查时发布于 2026-10-13 19:38:04 UTC），上游提交 687892d1046ecaf18829b45f5b86928a308258f4。相较原 v18.10.2 基线，包含 205 个上游提交、308 个变更文件。保留原 GBK/Hashline/.ompg/.omp 兼容与 Issue #5 运行稳定性修复。
+合并 OMP 官方正式版 v18.11.0，上游提交 c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4（2026-10-14T22:01:49Z）。相较 v18.10.4 有 309 个提交，保留 GBK、Hashline、.ompg/.omp、保护模式及 Issue #5 修复。
 
-## 合并与维护
+## 本版修复
 
-- 保留上游新版审批详情、终端渲染和 wall-time 提示阈值，同时保留 GBK 输出来源、ACP 写入保护和受保护 eval。
-- Gemini adapter 别名签名规则、按 agent runtime 覆盖、stats worker 到期恢复与 Windows 后台 writer 保留。
-- KDL 规则和 RPC SDK 通过官方生成器重新生成；冲突不使用整文件 ours/theirs 覆盖。
-- 每次修改前后均检查最新正式版，合并准确 tag 并重新验证。AGENTS.md 已记录；打包器还会核对最新正式版和其真实提交的祖先关系，失败拒绝打包。不是仅改版本号。
+- #8：learned.md 完整规则直接进入会话系统提示词，不再被摘要挤出；关闭摘要注入仍保留规则。复用已有清洗、脱敏和项目隔离。
+- #7：只有 learned.md、尚无固化摘要时，不再要求先读不存在的摘要；读取默认摘要返回正常 pending 说明，生成后立即可读，不创建伪文件。
+- Windows 长路径：记忆固化、规则文件与摘要读取改用现有 node:fs，解决超过 260 字符时 Bun.write ENOENT 中断固化的问题。
+- 上游配置发现安全边界兼容 .ompg 和 .omp；保留子项目优先、外部目标策略、无效首选配置拒绝回退。
+- 用户自定义 agent 目录生效；task agent 同时识别 .ompg/.omp，并保持子工程优先与同根 .ompg 优先。
 
-## 桥接更新
-
-桥接仓库：https://github.com/ethan-blue/ompg-herdr-bridge 。最新提交 1a5a3ff723ac545f6d3ee637894ea6559f3b0084，追加对齐官方 notify API，保留串行报告、完整 matching ACK、会话 context/revision 和 shutdown 修复。
-
-本机默认路径 ~/.ompg/agent/extensions 已安装并验证文件哈希、实际发现路径；原 ~/.omp 的独立集成未修改。Core ZIP 不自动替换用户扩展，其他机器需按桥接 README 单独安装。现有会话重载或重启后启用；真实 herdr GUI 闪烁未重新验收。
+会话首个请求后的系统前缀保持冻结以兼容签名 thinking；新 learn 文件规则在下一会话采用。禁用 local memory、受限工具会话及 SDK 显式 systemPrompt 覆盖保持原语义。注入不等于保证真实模型每次遵循。
 
 ## 安装、升级与回退
 
-完整解压 ZIP，在解压目录执行：
+完整解压 ZIP，运行 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1。
+退出运行中的 ompg 后升级，自定义安装继续使用原 -InstallDir；新开终端 ompg --version 应为 ompg/18.11.0-gbk.1。
+也可使用安装器 -Download -Version 18.11.0-gbk.1；回退使用 -Download -Version 18.10.4-gbk.1。
+原版 omp、旧版本、用户数据保留，同版本不同字节拒绝覆盖，ompg update 阻断官方版本替换。
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
-```
+## 桥接与边界
 
-退出运行中的 ompg 后升级，沿用原自定义 -InstallDir；新开终端 ompg --version 应为 ompg/18.10.4-gbk.1。
-本版安装器也支持 -Download -Version 18.10.4-gbk.1；回退使用 -Download -Version 18.10.2-gbk.2。
-保留原版 omp、旧版本、~/.ompg 用户数据；同版本不同字节拒绝覆盖，ompg update 阻断官方替换。
-
-按 agent 上限仍可通过 .ompg/config.yml 中 task.agentRuntimeOverrides 精确配置，0 取消上限。GBK 推断仍只读，编辑需要明确 encoding.json 策略。
-
-## 验收边界
-
-仅 Windows x64 AVX2，未签名预发布。门禁与未验证范围见 VALIDATION.md、docs/gbk-handoff/38。
-原机 400/41 秒 stall/stats 停更/herdr GUI、多实例、Unix/E630/ConPTY 性能尚缺证据，不以合并或已关闭 issue 冒充全部症状根治。GB18030 不支持；工具保护不是 OS 沙箱。
+herdr 桥接继续使用独立仓库 ethan-blue/ompg-herdr-bridge 的 1a5a3ff，不由 Core ZIP 静默替换扩展。该仓库本轮无开放 issue。
+仅 Windows x64 AVX2，未签名预发布。GB18030 不支持；工具保护不是 OS 沙箱。
+验证数字见 VALIDATION.md；Windows symlink EPERM 单独记录。Unix、E630、真实模型遵循度与 herdr GUI 未验证。

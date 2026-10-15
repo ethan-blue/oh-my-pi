@@ -1,24 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	PROJECT_CONFIG_DIR_NAME,
-	PROJECT_CONFIG_NAMESPACE,
-	getConfigAgentDirName,
-	getProjectDir,
-} from "@oh-my-pi/pi-utils";
+import { PROJECT_CONFIG_DIR_NAME, PROJECT_CONFIG_NAMESPACE, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled } from "./capability";
 import { resolveClaudePaths } from "./config/claude-paths";
 import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
 
-const priorityList = [
-	{ dir: PROJECT_CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
-	{ dir: ".claude" },
-	{ dir: ".codex" },
-	{ dir: ".gemini" },
-];
+const priorityList = [{ dir: PROJECT_CONFIG_DIR_NAME }, { dir: ".claude" }, { dir: ".codex" }, { dir: ".gemini" }];
 
 // =============================================================================
 // Package Directory (for optional external docs/examples)
@@ -86,9 +76,13 @@ export function getChangelogPath(): string | undefined {
  * User-level: ~/.ompg/agent, Claude's active config directory, ~/.codex, ~/.gemini
  * Project-level: .ompg, .omp, .claude, .codex, .gemini
  */
-const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
+const USER_CONFIG_BASES = priorityList.map(({ dir }) => ({
 	base: () =>
-		dir === ".claude" ? resolveClaudePaths().configDir : path.join(os.homedir(), globalAgentDir?.() ?? dir),
+		dir === PROJECT_CONFIG_DIR_NAME
+			? getAgentDir()
+			: dir === ".claude"
+				? resolveClaudePaths().configDir
+				: path.join(os.homedir(), dir),
 	name: dir,
 }));
 

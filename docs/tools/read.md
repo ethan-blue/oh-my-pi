@@ -89,7 +89,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 3. It checks the internal URL router, including built-ins and MCP-advertised schemes.
    - URLs of file-backed schemes that the router locates to a local file (`local://`, `artifact://`, `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source. An image question (`?q=`) is split off only for `local://` and `attachment://` images; on other schemes `?q=` stays part of the URL.
    - `agent://` path extraction (`/path`) returns a discrete value that bypasses pagination.
-   - Other internal resources are paginated in memory.
+   - Other internal resources are paginated in memory. With the local memory backend, a missing default `memory://root` summary returns a pending-consolidation explanation without creating a file. Arbitrary missing memory paths still fail. Existing `learned.md` rules are injected into the session prompt independently of the summary token budget; reading a summary is not a prerequisite for applying them.
 4. It prefers an existing literal filesystem path before treating selector-looking colons as archive, SQLite, PDF-image, or line-selector syntax.
 5. It tries archive resolution next with `resolveArchiveReadPath()` in `read-archive.ts`.
    - `parseArchivePathCandidates()` uses the unified archive extension registry before `:sub/path`.

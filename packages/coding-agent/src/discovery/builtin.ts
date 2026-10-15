@@ -39,6 +39,9 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	getProjectDiscoveryCeilings,
+	isForeignUserConfigRoot,
+	isUserConfigRoot,
 	loadFilesFromDir,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
@@ -82,21 +85,39 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
-/** Ancestor directories (cwd spelling) through the optional inclusive stop directory, compared canonically. */
+/** Project ancestors through an inclusive stop directory, but never home or temporary-root ceilings. */
 export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
+	const ceilings = getProjectDiscoveryCeilings();
 	let current = path.resolve(cwd);
 	const stop = stopAt ? normalizePathForComparison(stopAt) : null;
 	let depth = 0;
 	while (true) {
+		const normalized = normalizePathForComparison(current);
+		if (ceilings.has(normalized)) break;
 		ancestors.push({ dir: current, depth });
-		if (stop && normalizePathForComparison(current) === stop) break;
+		if (stop && normalized === stop) break;
 		const parent = path.dirname(current);
 		if (parent === current) break;
 		current = parent;
 		depth++;
 	}
 	return ancestors;
+}
+
+/** Skip user config roots without stopping the project walk at those directories. */
+export async function* getProjectAncestorDirs(ctx: LoadContext): AsyncGenerator<{ dir: string; depth: number }> {
+	const home = normalizePathForComparison(ctx.home);
+	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
+		if (normalizePathForComparison(ancestor.dir) === home || isUserConfigRoot(ancestor.dir)) continue;
+		if (!ctx.repoRoot) {
+			const foreignRoots = await Promise.all(
+				PROJECT_CONFIG_NAMESPACES.map(namespace => isForeignUserConfigRoot(ancestor.dir, namespace)),
+			);
+			if (foreignRoots.some(Boolean)) continue;
+		}
+		yield ancestor;
+	}
 }
 
 /**
@@ -109,14 +130,13 @@ async function findNearestProjectConfigDir(
 	ctx: LoadContext,
 	file: string,
 ): Promise<{ dir: string; depth: number } | null> {
-	const lookup = findProjectConfigUpward(ctx.cwd, file, { home: ctx.home, stopAt: ctx.repoRoot ?? ctx.home });
-	if (!lookup) return null;
-	if (lookup.status !== "found") throw lookup.cause;
-	const depth =
-		getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).find(
-			entry => normalizePathForComparison(entry.dir) === normalizePathForComparison(lookup.root),
-		)?.depth ?? 0;
-	return { dir: path.dirname(lookup.configPath), depth };
+	for await (const ancestor of getProjectAncestorDirs(ctx)) {
+		const lookup = findProjectConfigUpward(ancestor.dir, file, { home: ctx.home, stopAt: ancestor.dir });
+		if (!lookup) continue;
+		if (lookup.status !== "found") throw lookup.cause;
+		return { dir: path.dirname(lookup.configPath), depth: ancestor.depth };
+	}
+	return null;
 }
 
 // MCP
@@ -315,20 +335,19 @@ registerProvider<SystemPrompt>(systemPromptCapability.id, {
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	// Walk up from cwd finding .omp/skills/ in ancestors (closest first). Home is
 	// the user config root, never a project (see findNearestProjectConfigDir).
-	const home = normalizePathForComparison(ctx.home);
-	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(
-		({ dir }) => normalizePathForComparison(dir) !== home,
-	);
-	const projectScans = ancestors.flatMap(({ dir }) =>
-		PROJECT_CONFIG_NAMESPACES.map(namespace =>
-			scanSkillsFromDir(ctx, {
-				dir: path.join(dir, namespace, "skills"),
-				providerId: PROVIDER_ID,
-				level: "project",
-				requireDescription: true,
-			}),
-		),
-	);
+	const projectScans: Promise<LoadResult<Skill>>[] = [];
+	for await (const { dir } of getProjectAncestorDirs(ctx)) {
+		for (const namespace of PROJECT_CONFIG_NAMESPACES) {
+			projectScans.push(
+				scanSkillsFromDir(ctx, {
+					dir: path.join(dir, namespace, "skills"),
+					providerId: PROVIDER_ID,
+					level: "project",
+					requireDescription: true,
+				}),
+			);
+		}
+	}
 
 	// User-level scan from ~/.ompg/agent/skills/
 	const userScan = scanSkillsFromDir(ctx, {

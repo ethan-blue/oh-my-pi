@@ -5,7 +5,7 @@ import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { getConfigDirs } from "@oh-my-pi/pi-coding-agent/config";
 import { resolveClaudePaths } from "@oh-my-pi/pi-coding-agent/config/claude-paths";
 import { getUserPath } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("PI_CONFIG_DIR", () => {
 	const original = process.env.PI_CONFIG_DIR;
@@ -32,10 +32,22 @@ describe("PI_CONFIG_DIR", () => {
 	});
 
 	test("getConfigDirs respects PI_CONFIG_DIR for user base", () => {
-		process.env.PI_CONFIG_DIR = ".config/omp";
-		const result = getConfigDirs("commands", { project: false });
-		const expected = path.resolve(path.join(os.homedir(), ".config/omp", "agent", "commands"));
-		expect(result[0]).toEqual({ path: expected, source: ".omp", level: "user" });
+		const keys = ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"] as const;
+		const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+		try {
+			for (const key of keys) delete process.env[key];
+			process.env.PI_CONFIG_DIR = ".config/omp";
+			__resetDirsFromEnvForTests();
+			const result = getConfigDirs("commands", { project: false });
+			const expected = path.resolve(path.join(os.homedir(), ".config/omp", "agent", "commands"));
+			expect(result[0]).toEqual({ path: expected, source: ".omp", level: "user" });
+		} finally {
+			for (const key of keys) {
+				if (saved[key] === undefined) delete process.env[key];
+				else process.env[key] = saved[key];
+			}
+			__resetDirsFromEnvForTests();
+		}
 	});
 });
 

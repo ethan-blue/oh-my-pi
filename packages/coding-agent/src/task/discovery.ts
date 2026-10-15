@@ -20,7 +20,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, PROJECT_CONFIG_NAMESPACES } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -30,8 +30,6 @@ import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
-
-const TASK_AGENT_CONFIG_SOURCE = ".omp";
 
 /** Result of agent discovery */
 export interface DiscoveryResult {
@@ -91,18 +89,28 @@ export async function discoverAgents(
 	const resolvedCwd = path.resolve(cwd);
 
 	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
+		.filter(entry => PROJECT_CONFIG_NAMESPACES.some(namespace => namespace === entry.source))
 		.map(entry => ({
 			...entry,
 			path: path.resolve(entry.path),
 		}));
 
 	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
+		.filter(entry => PROJECT_CONFIG_NAMESPACES.some(namespace => namespace === entry.source))
 		.map(entry => ({
 			...entry,
 			path: path.resolve(entry.path),
-		}));
+			depth: path
+				.relative(resolvedCwd, path.dirname(path.dirname(entry.path)))
+				.split(path.sep)
+				.filter(Boolean).length,
+		}))
+		.sort(
+			(a, b) =>
+				a.depth - b.depth ||
+				PROJECT_CONFIG_NAMESPACES.findIndex(namespace => namespace === a.source) -
+					PROJECT_CONFIG_NAMESPACES.findIndex(namespace => namespace === b.source),
+		);
 
 	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];

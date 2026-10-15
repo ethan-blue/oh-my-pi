@@ -1,1 +1,1 @@
-`memory://root`: project-memory summary.
+`memory://root`: local project-memory summary. Before consolidation, this URL reports that the summary is pending. Applicable `learned.md` rules are already included in the session prompt when local memory is enabled; a summary read is not a prerequisite for applying them.

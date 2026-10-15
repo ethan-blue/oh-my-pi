@@ -5,6 +5,12 @@
 ### Fixed
 
 - Bounded silent parser-worker waits so stats sync releases its lock and can recover on the next attempt; SDK sync callers can adjust `workerTimeoutMs` ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
+## [18.11.0] - 2026-10-14
+
+### Fixed
+
+- Providers → Subscription windows no longer mixes Codex 5-hour and 7-day quotas across plans: Team and weekly-only (ProLite) accounts now share the 7-day row, the 5-hour row counts only accounts that have one, and labels no longer flip with whichever account reported last ([#15664](https://github.com/can1357/oh-my-pi/issues/15664))
+
 ## [18.10.4] - 2026-10-13
 
 ### Fixed
