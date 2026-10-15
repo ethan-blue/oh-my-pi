@@ -53,4 +53,4 @@ Rust 最终结果 3221 passed / 4 skipped、doctest 1 passed，退出 0。native
 
 源码定稿最终检查：bun check 退出 0；记忆+配置发现整合为 325 pass / 2 平台 skip / 9 symlink EPERM、962 assertions、37 文件；task/stats/审批/Gemini/KDL 为 689 pass / 2 skip / 1 symlink EPERM、3065 assertions、64 文件。最后一项 symlink 位于 task/worktree，和前九项不同，共十项阻塞，均不能记通过。套件存在重叠，不相加为唯一总数。
 
-编译 EXE、源码提交、发布和下载校验结果追加本记录或独立交付记录。未完成前不称已经发布或关闭 issue。Unix 实机、真实模型遵循度、herdr GUI、E630 和性能比较仍未验证。
+编译 EXE、源码提交、公开发布、下载内外清单、真实安装升级/回退与 issue 关闭已完成；准确提交、资产哈希、首跑网络失败及重试证据见 [40 号交付记录](40-18.11.0-gbk.1-release-verification.md)。Unix 实机、真实模型遵循度、herdr GUI、E630 和性能比较仍未验证。
