@@ -1,6 +1,6 @@
-# ompg v18.11.0-gbk.1
+# ompg v18.11.1-gbk.1
 
-基于 OMP v18.11.0 的 Windows x64（AVX2）GBK 支持分支，预发布。
+基于 OMP v18.11.1 的 Windows x64（AVX2）GBK 支持分支，预发布。
 命令 ompg、用户目录 ~/.ompg 与原版 omp 分开。
 
 ## 安装／升级
@@ -10,11 +10,11 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
 ```
 
-默认安装到 %LOCALAPPDATA%\ompg\versions\18.11.0-gbk.1 并切换启动器。
+默认安装到 %LOCALAPPDATA%\ompg\versions\18.11.1-gbk.1 并切换启动器。
 自定义位置须加原来的 `-InstallDir "D:\Tools\ompg"`。
-新开终端执行 `ompg --version`，预期 ompg/18.11.0-gbk.1。
+新开终端执行 `ompg --version`，预期 ompg/18.11.1-gbk.1。
 旧版本保留；同版本不同字节拒绝覆盖。
-回退使用本版脚本加 `-Download -Version 18.10.4-gbk.1`，沿用原安装目录。
+回退使用本版脚本加 `-Download -Version 18.11.0-gbk.1`，沿用原安装目录。
 -NoPath 可禁止修改用户 PATH；-Uninstall 保留用户会话数据及非安装文件。
 
 ## 编码设置
@@ -75,11 +75,11 @@ worker 须替换成实际 agent 的精确名字；0 取消上限。显式 run �
 herdr 桥接须单独从 https://github.com/ethan-blue/ompg-herdr-bridge 更新，Core ZIP 不自动替换扩展。每个 pane 仅一个集成报告方；真实 GUI 的全部闪烁原因尚未证明。
 
 
-本版完整合并官方 v18.11.0，保留 GBK、Hashline 和 Issue #5 修复。维护规则要求每次修改完成后再次检查并合并最新正式版；发行打包会验证真实上游提交已在交付历史中。
+本版完整合并官方 v18.11.1，保留 GBK、Hashline 和 Issue #5 修复。维护规则要求每次修改完成后再次检查并合并最新正式版；发行打包会验证真实上游提交已在交付历史中。
 桥接最新提交 1a5a3ff723ac545f6d3ee637894ea6559f3b0084，与官方 ExtensionUIContext.notify API 对齐。本机默认配置已单独部署桥接；其他机器仍需自行安装并重载对应会话。
 
 ## 本地记忆规则
 
-启用 local memory 后，当前工程 learned.md 的完整规则在会话创建时直接进入系统提示词，不依赖模型先调用 read。摘要预算只控制摘要，设为 0 仍保留规则。缺失摘要返回“尚未生成”说明，不创建空文件或要求反复读取。
+启用 local memory 后，当前工程 learned.md 的完整规则在会话创建时直接进入系统提示词，不依赖模型先调用 read。历史摘要默认按需读取：memories.summaryInjectionTokenLimit 默认 0；正数可开启预载，既有显式设置保持有效。摘要预算不裁剪规则。缺失摘要返回“尚未生成”说明，不创建空文件或要求反复读取。减少常驻历史内容不代表每个任务总 token 都更低，需要历史时仍有读取成本。
 
 为保持模型签名和提示缓存一致，活跃会话不会在每次 learn 后改写已发送的系统前缀；新规则保存在文件并在下一新会话自动采用。当前工具结果仍可见。禁用记忆或 SDK 显式覆盖 systemPrompt 的行为保持不变。大规则文件会占用实际上下文，请保留必要且明确的规则。

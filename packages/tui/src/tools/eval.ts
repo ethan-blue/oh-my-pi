@@ -71,6 +71,11 @@ export interface EvalCellResult {
 	code: string;
 	language?: EvalLanguage;
 	output: string;
+	/**
+	 * `output` without its `display[N]:` JSON sections, which renderers show
+	 * from `jsonOutputs` instead. Absent when the cell displayed no JSON.
+	 */
+	textOutput?: string;
 	status: "pending" | "running" | "complete" | "error";
 	durationMs?: number;
 	exitCode?: number;
@@ -587,7 +592,9 @@ function formatCellOutputLines(
 	theme: Theme,
 	width: number,
 ): { lines: readonly string[]; hiddenCount: number } {
-	if (!cell.output) {
+	// JSON displays render once, as the `jsonOutputs` tree below the last cell.
+	const output = cell.textOutput ?? cell.output;
+	if (!output) {
 		return { lines: [], hiddenCount: 0 };
 	}
 
@@ -600,7 +607,7 @@ function formatCellOutputLines(
 	const innerWidth = outputBlockContentWidth(width);
 
 	if (cell.hasMarkdown && cell.status !== "error") {
-		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());
+		const md = new Markdown(output, 0, 0, getMarkdownTheme());
 		const allLines = md.render(innerWidth);
 		const formatted = formatOutputPaneLines(
 			{
@@ -618,7 +625,7 @@ function formatCellOutputLines(
 	const isError = cell.status === "error";
 	const formatted = formatOutputPaneLines(
 		{
-			lines: cell.output.split("\n"),
+			lines: output.split("\n"),
 			expanded,
 			collapsedMaxLines: previewLines,
 			edge: "tail",
@@ -1244,7 +1251,7 @@ export const evalToolRenderer = {
 						title: cell.title,
 						outputs: [
 							...evalOutputNodes(
-								cell.output,
+								cell.textOutput ?? cell.output,
 								cell.hasMarkdown === true && cell.status !== "error",
 								previewLines,
 							),
