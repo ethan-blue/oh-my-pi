@@ -225,7 +225,7 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	// Durable rules must not disappear when the consolidated summary fills its
 	// budget. readLearnedLessons already sanitizes and redacts the full file.
 	const learnedOut = snapshot.learned;
-	if (!summaryOut && !learnedOut) return undefined;
+	// A summary-only project still needs its read URL when preloading is off.
 
 	return prompt.render(readPathTemplate, {
 		has_summary: Boolean(snapshot.summary),

@@ -207,7 +207,7 @@ describe("learned-lesson read-back", () => {
 	});
 
 	it("uses the pre-session learned snapshot when startup refresh has no session cache yet", async () => {
-		const settings = Settings.isolated({ "memory.backend": "local" });
+		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 5000 });
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Prior-session lesson" });
 		const initial = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
 		expect(initial).toContain("Prior-session lesson");
@@ -233,7 +233,7 @@ describe("learned-lesson read-back", () => {
 	});
 
 	it("keeps the active session snapshot when startup writes a new summary after the first prompt went out", async () => {
-		const settings = Settings.isolated({ "memory.backend": "local" });
+		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 5000 });
 		const session = {
 			sessionManager: { getSessionFile: () => "session-active-startup.jsonl" },
 			agent: { state: { messages: [{ role: "user" }] } },
@@ -255,7 +255,7 @@ describe("learned-lesson read-back", () => {
 	});
 
 	it("injects both the summary and lessons when both exist", async () => {
-		const settings = Settings.isolated({ "memory.backend": "local" });
+		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 5000 });
 		const root = getMemoryRoot(agentDir, settings.getCwd());
 		await Bun.write(path.join(root, "memory_summary.md"), "Consolidated guidance here.\n");
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "A captured lesson" });
@@ -327,7 +327,7 @@ describe("learned-lesson read-back", () => {
 	});
 
 	it("keeps learned rules in the prompt when the summary fills its injection budget", async () => {
-		const settings = Settings.isolated({ "memory.backend": "local" });
+		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 5000 });
 		const root = getMemoryRoot(agentDir, settings.getCwd());
 		// A large summary must not evict the user's durable rules.
 		const hugeSummary = `${"summary ".repeat(50_000)}\n`;

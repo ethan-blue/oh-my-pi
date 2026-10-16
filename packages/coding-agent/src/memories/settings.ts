@@ -89,5 +89,5 @@ export const cfgMemoriesFallbackTokenLimit = register({
 export const cfgMemoriesSummaryInjectionTokenLimit = register({
 	id: "memories.summaryInjectionTokenLimit",
 	type: "number",
-	default: 5000,
+	default: 0,
 });

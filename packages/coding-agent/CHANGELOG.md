@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Local memory now reads historical summaries on demand by default while keeping learned rules inline; explicit summary preload budgets remain supported.
+
 ### Added
 
 - Added exact-agent `task.agentRuntimeOverrides` for task and eval/workpool runs, including unlimited overrides and explicit-run limit precedence ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).

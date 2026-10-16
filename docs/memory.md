@@ -21,9 +21,11 @@ memory:
 
 ### What gets injected
 
-At session start, if a consolidated summary or manually captured lesson exists for the current project, it is injected into the system prompt as a **Memory Guidance** block. The summary and lessons share `memories.summaryInjectionTokenLimit`.
+At session start, captured `learned.md` rules are included in the **Memory Guidance** block after sanitization and secret redaction. Historical summaries default to on-demand reading: the prompt provides their URL when available, without preloading their contents. Tasks depending on prior project work can read the summary, then relevant detailed artifacts. Unrelated tasks avoid that history cost.
 
-If startup consolidation finishes after the first prompt build, the active session's summary snapshot is refreshed. Captured lessons remain pinned to the initial snapshot, so a concurrent `learn` call still affects only later sessions.
+`memories.summaryInjectionTokenLimit` defaults to `0`. Set a positive approximate token budget to preload summaries (for example, `1000`; `5000` restores the previous preload budget). Existing explicit values remain effective. This budget never truncates learned rules. Rules still consume context, so keep durable constraints concise and store long procedures as skills. There is no extra model call to select or compress rules.
+
+Startup consolidation can refresh the summary snapshot only before the conversation starts. Once messages exist, the prompt remains stable for caching and signed thinking. Captured lessons remain pinned to the initial snapshot, so a concurrent `learn` call affects later sessions. `/memory clear` explicitly invalidates the snapshot.
 
 - Treat memory as heuristic context — useful for process and prior decisions, not authoritative on current repo state.
 - Cite the memory artifact path when memory changes the plan, and pair it with current-repo evidence before acting.
@@ -35,7 +37,7 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 
 | URL                                    | Content                              |
 | -------------------------------------- | ------------------------------------ |
-| `memory://root`                        | Compact summary injected at startup  |
+| `memory://root`                        | Consolidated summary, read on demand by default |
 | `memory://root/MEMORY.md`              | Full long-term memory document       |
 | `memory://root/learned.md`             | Lessons captured by the `learn` tool |
 | `memory://root/skills/<name>/SKILL.md` | A generated skill playbook           |
@@ -129,7 +131,7 @@ If the requested memory role is not configured, memory model resolution falls ba
 | `memories.rolloutPayloadPercent`      | `0.7`   | Fraction of the selected model's context budget available to rollout payloads                                                            |
 | `memories.phase1InputTokenLimit`      | `4000`  | Per-session extraction input cap                                                                                                         |
 | `memories.fallbackTokenLimit`         | `16000` | Model token budget used when the model has no finite declared context window                                                             |
-| `memories.summaryInjectionTokenLimit` | `5000`  | Shared approximate token cap for the summary and captured lessons injected into the system prompt                                        |
+| `memories.summaryInjectionTokenLimit` | `0`     | Approximate summary preload budget; 0 means on-demand recall. Learned rules are independent. |
 
 ## Hindsight remote backend
 

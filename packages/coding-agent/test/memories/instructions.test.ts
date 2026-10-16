@@ -16,6 +16,27 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 describe("buildMemoryToolDeveloperInstructions", () => {
+	it("keeps history available on demand without preloading it, while explicit budgets opt in", async () => {
+		await withTempDir(async agentDir => {
+			const settings = Settings.isolated({ "memory.backend": "local" });
+			const root = getMemoryRoot(agentDir, settings.getCwd());
+			const summary = "HISTORICAL_DEPLOYMENT_DECISION\n".repeat(200);
+			await Bun.write(path.join(root, "memory_summary.md"), summary);
+			const deferred = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
+			expect(deferred).toContain("memory://root/memory_summary.md");
+			expect(deferred).not.toContain("HISTORICAL_DEPLOYMENT_DECISION");
+			await Bun.write(path.join(root, "learned.md"), "- Keep source encoding unchanged.\n");
+			const withRules = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
+			expect(withRules).toContain("Keep source encoding unchanged.");
+			expect(withRules).not.toContain("HISTORICAL_DEPLOYMENT_DECISION");
+			const preload = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 5000 });
+			const loaded = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), preload);
+			expect(loaded).toContain("HISTORICAL_DEPLOYMENT_DECISION");
+			expect(loaded).toContain("Keep source encoding unchanged.");
+			expect(await Bun.file(path.join(root, "memory_summary.md")).text()).toBe(summary);
+		});
+	});
+
 	it("does not instruct learned-only projects to read a summary that does not exist", async () => {
 		await withTempDir(async agentDir => {
 			const settings = Settings.isolated({ "memory.backend": "local" });
