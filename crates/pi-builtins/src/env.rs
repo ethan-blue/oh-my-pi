@@ -1539,8 +1539,10 @@ mod tests {
 		assert_eq!(err, "");
 		assert_eq!(code, 0);
 		assert_eq!(out, format!("{}\n{}\n", target.display(), dir.path().display()));
-		// As `chdir` does, -C leaves PWD as it was.
-		let (code, out, _) = sh_in("env -C sub QUOTING_STYLE=literal env | grep '^PWD='", dir.path()).await;
+		// As `chdir` does, -C leaves PWD as it was. Literal style: a Windows
+		// path's backslashes would otherwise print shell-quoted.
+		let script = "export QUOTING_STYLE=literal; env -C sub env | grep '^PWD='";
+		let (code, out, _) = sh_in(script, dir.path()).await;
 		assert_eq!((code, out), (0, format!("PWD={}\n", dir.path().display())));
 	}
 

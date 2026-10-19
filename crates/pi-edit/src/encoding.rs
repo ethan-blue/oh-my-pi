@@ -129,6 +129,56 @@ pub fn read_validated_prefix(
 	Ok(Some(prefix))
 }
 
+/// Validate an entire UTF-8 stream with bounded memory before searching it.
+///
+/// Returns `false` when a binary byte occurs, matching
+/// [`read_validated_prefix`]. `on_chunk` lets callers check cancellation before
+/// each read.
+pub fn validate_utf8_stream(
+	mut reader: impl Read,
+	mut on_chunk: impl FnMut() -> std::io::Result<()>,
+	binary_byte: Option<u8>,
+) -> std::io::Result<bool> {
+	let mut chunk = vec![0u8; 64 * 1024 + 3].into_boxed_slice();
+	let mut pending = 0usize;
+	let mut offset = 0usize;
+	loop {
+		on_chunk()?;
+		let read = reader.read(&mut chunk[pending..])?;
+		if read == 0 {
+			if pending != 0 {
+				return Err(std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!("invalid UTF-8 byte sequence at offset {offset}"),
+				));
+			}
+			return Ok(true);
+		}
+		let len = pending + read;
+		if binary_byte.is_some_and(|byte| chunk[..len].contains(&byte)) {
+			return Ok(false);
+		}
+		match std::str::from_utf8(&chunk[..len]) {
+			Ok(_) => {
+				offset += len;
+				pending = 0;
+			},
+			Err(err) if err.error_len().is_none() => {
+				let valid = err.valid_up_to();
+				offset += valid;
+				pending = len - valid;
+				chunk.copy_within(valid..len, 0);
+			},
+			Err(err) => {
+				return Err(std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!("invalid UTF-8 byte sequence at offset {}", offset + err.valid_up_to()),
+				));
+			},
+		}
+	}
+}
+
 /// Whether BOM-free, non-ASCII `bytes` are also strictly valid UTF-8.
 ///
 /// Such bytes carry a second legal reading whose text differs from the GBK
@@ -866,6 +916,22 @@ mod tests {
 			assert!(read_validated_prefix(bytes, 32, encoding, None).is_err());
 		}
 		assert!(read_validated_prefix(&b"needle\xff"[..], 32, TextEncoding::Utf8, Some(0)).is_err());
+	}
+
+	#[test]
+	fn streamed_utf8_validation_checks_split_characters_and_unread_tails() {
+		let mut bytes = vec![b'a'; 64 * 1024 + 2];
+		bytes.extend_from_slice("中".as_bytes());
+		assert!(validate_utf8_stream(bytes.as_slice(), || Ok(()), Some(0)).unwrap());
+		bytes.push(0xff);
+		let err = validate_utf8_stream(bytes.as_slice(), || Ok(()), Some(0)).unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+		assert!(
+			err.to_string()
+				.contains(&format!("offset {}", bytes.len() - 1))
+		);
+		*bytes.last_mut().expect("invalid byte was appended") = 0;
+		assert!(!validate_utf8_stream(bytes.as_slice(), || Ok(()), Some(0)).unwrap());
 	}
 
 	#[test]

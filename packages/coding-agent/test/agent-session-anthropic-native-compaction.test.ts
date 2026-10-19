@@ -7,6 +7,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
 interface MessagesRequest {
@@ -92,9 +93,15 @@ function withoutCacheControl(value: unknown): unknown {
 }
 
 describe("AgentSession Anthropic native compaction", () => {
-	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
+	let previousProxy: string | undefined;
+	let previousBaseUrl: string | undefined;
 
 	beforeEach(() => {
+		previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
+		previousBaseUrl = Bun.env.ANTHROPIC_BASE_URL;
+		// This test spies on first-party Messages requests, not an inherited
+		// alternate endpoint from the developer's environment.
+		delete Bun.env.ANTHROPIC_BASE_URL;
 		// A provider proxy moves first-party requests off the Cowork transport
 		// onto `globalThis.fetch`, where the spy below answers them.
 		Bun.env.PI_PROXY_ANTHROPIC = "http://proxy.example.test:8080";
@@ -105,6 +112,8 @@ describe("AgentSession Anthropic native compaction", () => {
 		vi.restoreAllMocks();
 		if (previousProxy === undefined) delete Bun.env.PI_PROXY_ANTHROPIC;
 		else Bun.env.PI_PROXY_ANTHROPIC = previousProxy;
+		if (previousBaseUrl === undefined) delete Bun.env.ANTHROPIC_BASE_URL;
+		else Bun.env.ANTHROPIC_BASE_URL = previousBaseUrl;
 		__resetProxyCache();
 	});
 
@@ -124,7 +133,7 @@ describe("AgentSession Anthropic native compaction", () => {
 				if (!String(input).startsWith("https://api.anthropic.com/v1/messages")) {
 					throw new Error(`Unexpected request to ${String(input)}`);
 				}
-				requests.push(JSON.parse(String(init?.body)));
+				requests.push(JSON.parse(requestBodyText(init) ?? "{}"));
 				return respond(requests.length);
 			}),
 		);

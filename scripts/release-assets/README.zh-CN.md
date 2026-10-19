@@ -1,6 +1,6 @@
-# ompg v18.11.1-gbk.1
+# ompg v18.12.2-gbk.1
 
-基于 OMP v18.11.1 的 Windows x64（AVX2）GBK 支持分支，预发布。
+基于 OMP v18.12.2 的 Windows x64（AVX2）GBK 支持分支，预发布。
 命令 ompg、用户目录 ~/.ompg 与原版 omp 分开。
 
 ## 安装／升级
@@ -10,11 +10,11 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
 ```
 
-默认安装到 %LOCALAPPDATA%\ompg\versions\18.11.1-gbk.1 并切换启动器。
+默认安装到 %LOCALAPPDATA%\ompg\versions\18.12.2-gbk.1 并切换启动器。
 自定义位置须加原来的 `-InstallDir "D:\Tools\ompg"`。
-新开终端执行 `ompg --version`，预期 ompg/18.11.1-gbk.1。
+新开终端执行 `ompg --version`，预期 ompg/18.12.2-gbk.1。
 旧版本保留；同版本不同字节拒绝覆盖。
-回退使用本版脚本加 `-Download -Version 18.11.0-gbk.1`，沿用原安装目录。
+回退使用本版脚本加 `-Download -Version 18.11.1-gbk.1`，沿用原安装目录。
 -NoPath 可禁止修改用户 PATH；-Uninstall 保留用户会话数据及非安装文件。
 
 ## 编码设置
@@ -59,7 +59,7 @@ E630／Keil 工程、其他平台尚未验收；详见 Release 的 VALIDATION.md
 
 ## 本版运行稳定性设置
 
-本版修复 Gemini CCA 别名历史签名、Windows 后台终端输出、stats 静默 worker 和按 agent 运行上限。精确范围与未验证场景见 RELEASE_NOTES.md、VALIDATION.md。
+本版保留 Gemini CCA 别名历史签名、Windows 后台终端输出、stats 静默 worker 和按 agent 运行上限等 fork 修复。显式指定的超大 UTF-8 文件现在搜索全文，并在返回任何匹配前验证完整编码；GBK 和递归大文件仍保留有界搜索窗口。精确范围与未验证场景见 RELEASE_NOTES.md、VALIDATION.md。
 
 可在工程 .ompg/config.yml 或 ompg config path 显示的用户设置中配置：
 
@@ -74,9 +74,8 @@ worker 须替换成实际 agent 的精确名字；0 取消上限。显式 run �
 
 herdr 桥接须单独从 https://github.com/ethan-blue/ompg-herdr-bridge 更新，Core ZIP 不自动替换扩展。每个 pane 仅一个集成报告方；真实 GUI 的全部闪烁原因尚未证明。
 
-
-本版完整合并官方 v18.11.1，保留 GBK、Hashline 和 Issue #5 修复。维护规则要求每次修改完成后再次检查并合并最新正式版；发行打包会验证真实上游提交已在交付历史中。
-桥接最新提交 1a5a3ff723ac545f6d3ee637894ea6559f3b0084，与官方 ExtensionUIContext.notify API 对齐。本机默认配置已单独部署桥接；其他机器仍需自行安装并重载对应会话。
+本版合并官方 v18.12.2，并保留 GBK、Hashline、.ompg/.omp、runtime overrides 和 fork 隔离。维护规则要求每次修改完成后再次检查并合并最新正式版；发行打包会验证真实上游提交已在交付历史中。
+桥接独立维护于 https://github.com/ethan-blue/ompg-herdr-bridge，不包含在 Core ZIP 中；如需桥接，请单独安装并验证活动配置的扩展发现路径。
 
 ## 本地记忆规则
 

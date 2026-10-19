@@ -677,7 +677,13 @@ fn entry_time(meta: &Metadata, cfg: &Config) -> Option<(i64, i64)> {
 	match kind {
 		TimeKind::Modification => Some((meta.mtime()?, meta.mtime_nsec()?)),
 		TimeKind::Access => Some((meta.atime()?, meta.atime_nsec()?)),
-		TimeKind::Change => Some((meta.ctime()?, meta.ctime_nsec()?)),
+		// Windows has no POSIX status-change time; like `stat`, fall back to
+		// the last write time, as Cygwin does.
+		TimeKind::Change => match (meta.ctime(), meta.ctime_nsec()) {
+			(Some(secs), Some(nsec)) => Some((secs, nsec)),
+			_ if cfg!(windows) => Some((meta.mtime()?, meta.mtime_nsec()?)),
+			_ => None,
+		},
 	}
 }
 
@@ -1077,6 +1083,10 @@ mod tests {
 			std::os::unix::fs::symlink("nowhere", root.join("e/dangling")).unwrap();
 			std::os::unix::fs::symlink("f1.txt", root.join("a/flink")).unwrap();
 		}
+		// Creating symlinks needs a privilege on Windows; a 6-byte file keeps
+		// the inode and apparent-size totals the tests expect from `a/flink`.
+		#[cfg(not(unix))]
+		fs::write(root.join("a/flink"), "f1.txt").unwrap();
 		(dir, root)
 	}
 
@@ -1124,9 +1134,9 @@ mod tests {
 		let (_, out, _) = du(&root, &["--inodes", "-s", "d"]);
 		assert_eq!(out, "3\td\n");
 		let (_, out, _) = du(&root, &["--inodes", "-s", "a", "d"]);
-		assert_eq!(out, if cfg!(unix) { "8\ta\n2\td\n" } else { "7\ta\n2\td\n" });
+		assert_eq!(out, "8\ta\n2\td\n");
 		let (_, out, _) = du(&root, &["--inodes", "-s", "-l", "a", "d"]);
-		assert_eq!(out, if cfg!(unix) { "8\ta\n3\td\n" } else { "7\ta\n3\td\n" });
+		assert_eq!(out, "8\ta\n3\td\n");
 	}
 
 	#[test]
@@ -1143,7 +1153,7 @@ mod tests {
 		let (_dir, root) = tree();
 		// 5 + 6 (symlink text) + 50 MiB sparse + 300 KiB + 4.
 		let (_, out, _) = du(&root, &["-sb", "a"]);
-		assert_eq!(out, if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
+		assert_eq!(out, "52736015\ta\n");
 		let (_, out, _) = du(&root, &["-A", "-a", "-BK", "a/b"]);
 		assert_eq!(value_of(&out, "a/b/big"), "300K");
 		assert_eq!(value_of(&out, "a/b/x.log"), "1K");
@@ -1157,11 +1167,11 @@ mod tests {
 			let (_, out, _) = du_env(&root, &["-s", "-A", "a"], vars, "");
 			String::from_utf8(out).unwrap()
 		};
-		assert_eq!(run(&[("DU_BLOCK_SIZE", "1")]), if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
+		assert_eq!(run(&[("DU_BLOCK_SIZE", "1")]), "52736015\ta\n");
 		// An invalid suffix keeps the number, as gnulib does.
-		assert_eq!(run(&[("DU_BLOCK_SIZE", "5x")]), if cfg!(unix) { "10547203\ta\n" } else { "10547202\ta\n" });
+		assert_eq!(run(&[("DU_BLOCK_SIZE", "5x")]), "10547203\ta\n");
 		assert_eq!(run(&[("DU_BLOCK_SIZE", ""), ("BLOCK_SIZE", "1")]), "51501\ta\n");
-		assert_eq!(run(&[("BLOCKSIZE", "1")]), if cfg!(unix) { "52736015\ta\n" } else { "52736009\ta\n" });
+		assert_eq!(run(&[("BLOCKSIZE", "1")]), "52736015\ta\n");
 		assert_eq!(run(&[("POSIXLY_CORRECT", "")]), "103001\ta\n");
 		assert_eq!(run(&[("BLOCK_SIZE", "human-readable")]), "51M\ta\n");
 		let (_, out, _) = du_env(&root, &["-s", "-A", "-k", "a"], &[("DU_BLOCK_SIZE", "1")], "");
@@ -1181,9 +1191,9 @@ mod tests {
 		assert!(rows(&out).iter().all(|(value, _)| value.parse::<u64>().unwrap() <= 5), "{out}");
 		// -S leaves a/b's 307204 bytes out of a.
 		let (_, out, _) = du(&root, &["-b", "-S", "a"]);
-		assert_eq!(value_of(&out, "a"), if cfg!(unix) { "52428811" } else { "52428805" });
+		assert_eq!(value_of(&out, "a"), "52428811");
 		let (_, out, _) = du(&root, &["-b", "-S", "-c", "a"]);
-		assert_eq!(value_of(&out, "total"), if cfg!(unix) { "52736015" } else { "52736009" });
+		assert_eq!(value_of(&out, "total"), "52736015");
 	}
 
 	#[test]
@@ -1292,7 +1302,7 @@ mod tests {
 		let (_dir, root) = tree();
 		// --max-depth is base 0; --time words and styles may be abbreviated.
 		let (_, out, _) = du(&root, &["--inodes", "-d", "0x0", "a"]);
-		assert_eq!(out, if cfg!(unix) { "8\ta\n" } else { "7\ta\n" });
+		assert_eq!(out, "8\ta\n");
 		let (code, out, _) = du_env(&root, &["--inodes", "--time=s", "--time-style=f", "-s", "d"], &[("TZ", "UTC")], "");
 		assert_eq!(code, 0);
 		let (full_code, full_out, full_err) = du_env(&root, &["--inodes", "--time=ctime", "--time-style=full-iso", "-s", "d"], &[("TZ", "UTC")], "");

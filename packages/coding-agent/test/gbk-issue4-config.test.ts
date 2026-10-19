@@ -524,6 +524,30 @@ describe("Issue #4: config discovery and text encoding regression", () => {
 			expect(text).toContain("Skipped 1 undecodable file(s) in report mode");
 		});
 
+		it("reports incomplete GBK coverage instead of a false zero-match for explicit file scopes", async () => {
+			const project = path.join(tempRoot, "grep-large-gbk");
+			const file = path.join(project, "src", "late.c");
+			const peer = path.join(project, "src", "peer.c");
+			await Bun.write(path.join(project, ".ompg", "encoding.json"), POLICY_GBK);
+			await Bun.write(peer, "int x = 1;\n");
+			const cap = 4 * 1024 * 1024;
+			const bytes = Buffer.alloc(cap + 128, 0x61);
+			for (let offset = 127; offset < bytes.length; offset += 128) bytes[offset] = 0x0a;
+			bytes.set(GBK_SOURCE, 0);
+			bytes.set(Buffer.from("\nlate-needle\n"), cap + 20);
+			await Bun.write(file, bytes);
+
+			const tool = new GrepTool(createSession(project));
+			for (const target of [file, `${file};${peer}`]) {
+				const result = await tool.execute("grep-large-gbk", { pattern: "late-needle", path: target });
+				const text = resultText(result);
+				expect(text).toContain("No matches in searched content (GBK search limited large files");
+				expect(text).toContain("late.c");
+				expect(text).not.toContain("No matches found");
+				expect(result.details?.searchComplete).toBe(false);
+			}
+		});
+
 		it("throws ToolError when undecodable file is encountered in fail mode", async () => {
 			const project = path.join(tempRoot, "grep-fail-mode");
 			await fs.mkdir(project, { recursive: true });

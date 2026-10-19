@@ -268,9 +268,13 @@ export interface SystemPromptOverride {
  * and `.agent/.agents` coverage come from the capability providers, so a
  * repo-root file wins from a nested cwd.
  */
-export async function discoverSystemPromptOverride(cwd?: string): Promise<SystemPromptOverride | undefined> {
+export async function discoverSystemPromptOverride(
+	cwd?: string,
+	agentDir?: string,
+): Promise<SystemPromptOverride | undefined> {
 	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
 		cwd: cwd ?? getProjectDir(),
+		agentDir,
 	});
 	for (const level of ["project", "user"] as const) {
 		const text = result.items.find(item => item.level === level && (item.kind ?? "text") === "text");
@@ -317,6 +321,8 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
+	/** User configuration directory for an SDK session. */
+	agentDir?: string;
 	/** Disabled extension IDs to honor instead of the process-global settings. */
 	disabledExtensions?: string[];
 }
@@ -404,7 +410,10 @@ export async function loadProjectContextFiles(
 export async function loadSystemPromptFiles(options: LoadContextFilesOptions = {}): Promise<string | null> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
 
-	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, { cwd: resolvedCwd });
+	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
+		cwd: resolvedCwd,
+		agentDir: options.agentDir,
+	});
 
 	if (result.items.length === 0) return null;
 
@@ -703,7 +712,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
 	if (resolvedSystemPromptTemplate === undefined && !hasExplicitCustomPrompt) {
-		const override = await discoverSystemPromptOverride(resolvedCwd);
+		const override = await discoverSystemPromptOverride(resolvedCwd, options.agentDir);
 		if (override?.kind === "template" && override.content !== undefined) {
 			resolvedSystemPromptTemplate = override.content;
 		} else if (override?.content !== undefined) {
@@ -774,7 +783,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasExplicitCustomPrompt || resolvedSystemPromptTemplate !== undefined || resolvedCustomPromptInput !== undefined;
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
-		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
+		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd, agentDir: options.agentDir });
 	const contextFilesPromise = (async () => {
 		const primary = providedContextFiles
 			? providedContextFiles

@@ -170,19 +170,24 @@ describe("GBK search and AST", () => {
 	});
 
 	for (const encoding of ["utf8", "gbk"]) {
-		it(`oversized ${encoding} search withholds a character crossing the prefix boundary`, async () => {
+		it(`oversized ${encoding} search validates the bytes it searches without splitting characters`, async () => {
 			const cap = 4 * 1024 * 1024;
 			const file = path.join(tmpDir, encoding === "gbk" ? "src/large.c" : "large.txt");
 			const bytes = Buffer.alloc(cap + 64, 0x61);
 			bytes.set(Buffer.from("needle\n"));
 			bytes.set(encoding === "gbk" ? [0xd6, 0xd0] : [0xe4, 0xb8, 0xad], cap - 1);
-			// This byte is outside the upstream searched window. It must not turn
-			// a bounded prefix search into an unbounded whole-file validation.
+			// Recursive and GBK searches read a bounded prefix; an explicitly named
+			// UTF-8 file is strictly validated in full before its streamed search.
 			bytes[cap + 32] = 0xff;
 			await Bun.write(file, bytes);
 			for (const target of [file, tmpDir]) {
 				for (const mode of [GrepOutputMode.Content, GrepOutputMode.Count, GrepOutputMode.FilesWithMatches]) {
-					const result = await grep({ path: target, pattern: "needle", mode, encodingPolicy: policyOption });
+					const search = grep({ path: target, pattern: "needle", mode, encodingPolicy: policyOption });
+					if (encoding === "utf8" && target === file) {
+						await expect(search).rejects.toThrow("invalid UTF-8");
+						continue;
+					}
+					const result = await search;
 					expect(result.totalMatches).toBe(1);
 					expect(result.matches.some(match => match.line?.includes("\uFFFD"))).toBe(false);
 				}
@@ -195,6 +200,24 @@ describe("GBK search and AST", () => {
 			);
 		});
 	}
+
+	it("explicit oversized UTF-8 search finds a match beyond the recursive prefix", async () => {
+		const cap = 4 * 1024 * 1024;
+		const file = path.join(tmpDir, "large.txt");
+		const bytes = Buffer.alloc(cap + 128, 0x61);
+		for (let offset = 127; offset < bytes.length; offset += 128) bytes[offset] = 0x0a;
+		bytes.set([0xe4, 0xb8, 0xad], cap - 1);
+		bytes.set(Buffer.from("\nlate-needle 中\n"), cap + 20);
+		await Bun.write(file, bytes);
+
+		for (const mode of [GrepOutputMode.Content, GrepOutputMode.Count, GrepOutputMode.FilesWithMatches]) {
+			const explicit = await grep({ path: file, pattern: "late-needle", mode, encodingPolicy: policyOption });
+			expect(explicit.totalMatches).toBe(1);
+			if (mode === GrepOutputMode.Content) expect(explicit.matches[0]?.line).toBe("late-needle 中");
+			const recursive = await grep({ path: tmpDir, pattern: "late-needle", mode, encodingPolicy: policyOption });
+			expect(recursive.totalMatches).toBe(0);
+		}
+	});
 
 	it("ast_grep finds a pattern near Chinese text with offsets into the decoded text (E19)", async () => {
 		await fs.writeFile(path.join(tmpDir, "src", "t.ts"), gbk("const 值 = 1;\nconst other = 值 + 2;\n"));

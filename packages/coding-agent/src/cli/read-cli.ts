@@ -46,7 +46,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
 	// Capability providers (skills, MCP servers, SSH hosts) honor this session's provider switches.
-	initializeWithSettings(settings);
+	const releaseSettings = initializeWithSettings(settings);
 
 	const session: ToolSession = {
 		cwd,
@@ -127,6 +127,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		process.stderr.write(`${chalk.red(renderError(err))}\n`);
 		failed = true;
 	} finally {
+		releaseSettings();
 		MCPManager.setDeferredInstance(undefined);
 		if (mcpManager) {
 			await mcpManager.disconnectAll();

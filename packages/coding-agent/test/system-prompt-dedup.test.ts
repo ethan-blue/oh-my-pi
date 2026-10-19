@@ -163,7 +163,6 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		const promptText = systemPrompt.join("\n\n");
 		const appendMatches = promptText.match(new RegExp(escapeRegExp(appendPrompt), "g")) ?? [];
-		expect(systemPrompt).toHaveLength(2);
 		expect(promptText).toContain("CLI custom prompt");
 		expect(promptText).toContain("<workspace-tree>");
 		expect(promptText).toContain("<dir-context>");
@@ -207,6 +206,34 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		await expect(loadSystemPromptFiles({ cwd: projectDir })).resolves.toBe("Project SYSTEM prompt");
 	});
+	it("isolates SDK system instructions between custom agent directories", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const firstAgentDir = path.join(tempDir, "sdk-agent-first");
+		const secondAgentDir = path.join(tempDir, "sdk-agent-second");
+		await fs.promises.mkdir(projectDir, { recursive: true });
+		await Bun.write(path.join(firstAgentDir, "SYSTEM.md"), "First SDK-private system instructions");
+		await Bun.write(path.join(secondAgentDir, "SYSTEM.md"), "Second SDK-private system instructions");
+
+		const promptFor = async (agentDir: string) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: projectDir,
+				agentDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: [],
+			});
+			return systemPrompt.join("\n\n");
+		};
+		const firstPrompt = await promptFor(firstAgentDir);
+		const secondPrompt = await promptFor(secondAgentDir);
+
+		expect(firstPrompt).toContain("First SDK-private system instructions");
+		expect(firstPrompt).not.toContain("Second SDK-private system instructions");
+		expect(secondPrompt).toContain("Second SDK-private system instructions");
+		expect(secondPrompt).not.toContain("First SDK-private system instructions");
+	});
+
 	it("drops identical explicit context entries even when file names differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");

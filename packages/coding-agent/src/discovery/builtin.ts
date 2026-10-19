@@ -317,8 +317,9 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 		const selected = await findNearestProjectConfigDir(ctx, file);
 		if (selected) await load(path.join(selected.dir, file), "project", kind);
 	}
-	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
-	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
+	const userDir = ctx.agentDir ?? getAgentDir();
+	await load(path.join(userDir, "SYSTEM.md"), "user", "text");
+	await load(path.join(userDir, "SYSTEM_TEMPLATE.md"), "user", "template");
 
 	return { items, warnings };
 }
@@ -760,7 +761,10 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 
 		for (const entry of typeEntries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isFile()) continue;
+			// `readDirEntries` is a plain `readdir(withFileTypes)` and reports a symlink as
+			// a link, not a file, so linking a shared hook into the hooks dir would drop it
+			// silently. Match the extension loader and accept links here.
+			if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
 			const hookPath = path.join(typeDir, entry.name);
 			const baseName = entry.name.includes(".") ? entry.name.slice(0, entry.name.lastIndexOf(".")) : entry.name;

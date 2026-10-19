@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { handleSkillList, runSkillsCommand } from "../../src/cli/skill-list";
-import { resetSettingsForTest } from "../../src/config/settings";
+import { initializeWithSettings, isProviderEnabled, resetCapabilityForTests } from "../../src/capability";
+import { cfgDisabledProviders } from "../../src/config/model-settings";
+import { Settings, resetSettingsForTest } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
@@ -32,7 +34,7 @@ afterEach(async () => {
 
 describe("runSkillsCommand", () => {
 	test("lists skills for a directory with public metadata", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skills-cmd-"));
+		const directory = await fs.mkdtemp(path.join(tempHome, "omp-skills-cmd-"));
 		const skillsRoot = path.join(directory, "skills-fixture");
 		await fs.mkdir(path.join(skillsRoot, "first", "calendar"), { recursive: true });
 		await fs.mkdir(path.join(skillsRoot, "second", "reviewer"), { recursive: true });
@@ -75,7 +77,7 @@ describe("runSkillsCommand", () => {
 	});
 
 	test("resolves relative custom directories against the requested directory", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-rel-${Snowflake.next()}-`));
+		const directory = await fs.mkdtemp(path.join(tempHome, `omp-skills-rel-${Snowflake.next()}-`));
 		await fs.mkdir(path.join(directory, "rel-root", "calendar"), { recursive: true });
 		await Bun.write(
 			path.join(directory, "rel-root", "calendar", "SKILL.md"),
@@ -100,13 +102,28 @@ describe("runSkillsCommand", () => {
 describe("handleSkillList", () => {
 	afterEach(() => {
 		resetSettingsForTest();
+		resetCapabilityForTests();
 		// `Settings.init()` opens `<agentDir>/agent.db`; release it so the temp
 		// home can be removed (Windows refuses to delete open files).
 		AgentStorage.close();
 	});
 
+	test("restores the previous provider settings after listing", async () => {
+		const directory = path.join(tempHome, "project");
+		await fs.mkdir(directory, { recursive: true });
+		const host = Settings.isolated();
+		cfgDisabledProviders.set(host, ["claude"]);
+		const releaseHost = initializeWithSettings(host);
+		try {
+			await runSkillsCommand({ cwd: directory });
+			expect(isProviderEnabled("claude")).toBe(false);
+		} finally {
+			releaseHost();
+		}
+	});
+
 	test("keeps stdout to TSV rows and sends warnings to stderr", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
+		const directory = await fs.mkdtemp(path.join(tempHome, `omp-skills-list-${Snowflake.next()}-`));
 		for (const root of ["first", "second"]) {
 			await fs.mkdir(path.join(directory, root, "calendar"), { recursive: true });
 			await Bun.write(
@@ -147,7 +164,7 @@ describe("handleSkillList", () => {
 	});
 
 	test("rejects a target that is not a directory", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
+		const directory = await fs.mkdtemp(path.join(tempHome, `omp-skills-list-${Snowflake.next()}-`));
 		const file = path.join(directory, "file.txt");
 		await Bun.write(file, "not a directory");
 		try {

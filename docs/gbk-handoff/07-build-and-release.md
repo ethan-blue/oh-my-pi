@@ -1,6 +1,6 @@
 # 07 — P14—P16：构建、安装、GitHub Release 发布
 
-本章是实现完成后的执行说明。当前没有 GBK 二进制，也没有可上传的功能版本。不得把上游原版程序改名后宣称 GBK 已支持。
+本章保留最初 P14—P16 的构建与验收计划；发行版已存在，示例中的旧版本号仅用于说明历史步骤。实际发布须使用当前未占用的新版本、干净提交和当次重新构建/测试的产物，不能将上游程序改名冒充 GBK 版本。
 
 发布目标固定为 `ethan-blue/oh-my-pi`。首版只交付实际验证过的 Windows x64 预发布版；稳定版需要通用验收和实际 E630 验收完成。
 
@@ -125,11 +125,12 @@ Windows 签名若未配置，明确记录未签名，不伪造签名/SmartScreen
 
 ### 发布命令模板（全部 gate 通过后才执行）
 
-以下使用 PowerShell 参数数组的普通调用方式，不拼接执行任意 shell 文本。`release-staging`、说明文件和 ZIP 均是 P14/P15 生成的目标，当前不存在。
+以下使用 PowerShell 参数数组的普通调用方式，不拼接执行任意 shell 文本。打包脚本将 ZIP 和说明文件放在 `release-staging/<版本>/`，不要误取顶层目录或旧版本的产物。
 
 ```powershell
 $releaseRepo = 'ethan-blue/oh-my-pi'
-$releaseTag = 'v18.8.4-gbk.1'
+$releaseVersion = '18.12.2-gbk.1' # 每次发布前更新为尚未使用的新版本
+$releaseTag = "v$releaseVersion"
 $releaseSha = (git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve release SHA' }
 $releaseStatus = git status --porcelain
@@ -143,8 +144,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Tag creation failed' }
 git push origin "refs/tags/$releaseTag"
 if ($LASTEXITCODE -ne 0) { throw 'Tag push failed' }
 
-$stage = Join-Path (Get-Location) 'release-staging'
-$zip = Join-Path $stage 'ompg-18.8.4-gbk.1-windows-x64.zip'
+$stage = Join-Path (Get-Location) "release-staging\$releaseVersion"
+$zip = Join-Path $stage "ompg-$releaseVersion-windows-x64.zip"
 $sums = Join-Path $stage 'SHA256SUMS.txt'
 $notes = Join-Path $stage 'RELEASE_NOTES.md'
 $validation = Join-Path $stage 'VALIDATION.md'
@@ -152,7 +153,7 @@ foreach ($file in @($zip, $sums, $notes, $validation)) {
     if (-not (Test-Path -LiteralPath $file)) { throw "Missing release file: $file" }
 }
 
-gh release create $releaseTag $zip $sums $validation --repo $releaseRepo --verify-tag --draft --prerelease --title "ompg $releaseTag (Windows x64)" --notes-file $notes
+gh release create $releaseTag $zip $sums $notes $validation --repo $releaseRepo --verify-tag --draft --prerelease --title "ompg $releaseTag (Windows x64)" --notes-file $notes
 if ($LASTEXITCODE -ne 0) { throw 'Draft release upload failed' }
 
 # 在独立空目录重新下载并核验所有资产；通过后才执行公开发布命令。

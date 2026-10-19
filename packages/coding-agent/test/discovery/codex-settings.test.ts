@@ -33,6 +33,7 @@ describe("Codex config.toml settings", () => {
 
 	afterEach(async () => {
 		resetSettingsForTest();
+		// `Settings.init` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
 		AgentStorage.close();
 		Bun.gc(true);
 		clearFsCache();
