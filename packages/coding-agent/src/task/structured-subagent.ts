@@ -34,7 +34,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runSubprocess } from "./executor";
+import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -73,7 +73,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
-	resolveTaskMaxRuntimeMs,
+	taskAgentRuntimeOverride,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -162,6 +162,8 @@ export interface StructuredSubagentRequest {
 	workPoolYieldItems?: WorkPoolYieldItem[];
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** See {@link ExecutorOptions.onToolResult}. */
+	onToolResult?: (result: SubagentToolResult) => void;
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -633,13 +635,17 @@ function buildExecutorOptions(
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
-		maxRuntimeMs: resolveTaskMaxRuntimeMs(session.settings, policy.agentName, request.maxRuntimeMs),
+		// Unset stays unset so runSubprocess inherits the settings cap (the
+		// upstream agent-bridge contract); a configured per-agent runtime
+		// override (or an explicit request cap) still rides the options.
+		maxRuntimeMs: request.maxRuntimeMs ?? taskAgentRuntimeOverride(session.settings, policy.agentName),
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
+		onToolResult: request.onToolResult,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,

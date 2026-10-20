@@ -396,11 +396,15 @@ export const cfgTaskAgentRuntimeOverrides = register({
 	},
 });
 
+/** The per-agent runtime override configured for this exact agent name, if any. */
+export function taskAgentRuntimeOverride(settings: Settings, agentName: string): number | undefined {
+	const overrides = cfgTaskAgentRuntimeOverrides.get(settings);
+	return Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined;
+}
+
 /** Explicit run limit wins; otherwise resolve an exact agent name before the global cap. */
 export function resolveTaskMaxRuntimeMs(settings: Settings, agentName: string, explicit?: number): number {
-	const overrides = cfgTaskAgentRuntimeOverrides.get(settings);
-	const selected =
-		explicit ?? (Object.hasOwn(overrides, agentName) ? overrides[agentName] : cfgTaskMaxRuntimeMs.get(settings));
+	const selected = explicit ?? taskAgentRuntimeOverride(settings, agentName) ?? cfgTaskMaxRuntimeMs.get(settings);
 	const runtime = Math.max(0, Math.trunc(Number(selected) || 0));
 	if (!Number.isFinite(runtime) || runtime > MAX_TIMER_DELAY_MS) {
 		throw new Error(`Subagent runtime exceeds the supported timer range (0 to ${MAX_TIMER_DELAY_MS} milliseconds).`);

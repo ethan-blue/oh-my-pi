@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { invalidateProjectConfigCaches, isEnoent } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
@@ -77,6 +77,11 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 	}
 	// Invalidate the capability fs cache so subsequent reads see the new content
 	invalidateFsCache(filePath);
+	// A project mcp.json written here may have been negatively cached by the
+	// fork's upward project-config walk (findProjectConfigUpward) moments
+	// before this write — e.g. /mcp enable resolving the path, then loading
+	// configs to connect. Drop those walk caches so discovery sees the file.
+	invalidateProjectConfigCaches();
 }
 
 /**

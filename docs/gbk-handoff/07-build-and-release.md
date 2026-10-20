@@ -129,7 +129,7 @@ Windows 签名若未配置，明确记录未签名，不伪造签名/SmartScreen
 
 ```powershell
 $releaseRepo = 'ethan-blue/oh-my-pi'
-$releaseVersion = '18.12.2-gbk.1' # 每次发布前更新为尚未使用的新版本
+$releaseVersion = '18.12.3-gbk.1' # 每次发布前更新为尚未使用的新版本
 $releaseTag = "v$releaseVersion"
 $releaseSha = (git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve release SHA' }

@@ -382,6 +382,28 @@ describe("Issue #4: config discovery and text encoding regression", () => {
 			expect(discovered?.policy.resolve(path.join(project, "a.c"), true)).toBe("gbk");
 		});
 
+		it("points an uncovered GBK read at the selected .ompg policy, not the ignored legacy file", async () => {
+			const project = path.join(tempRoot, "hint-project");
+			const preferred = path.join(project, ".ompg", "encoding.json");
+			await Bun.write(preferred, POLICY_GBK);
+			const textPolicy = JSON.stringify({
+				schemaVersion: 1,
+				enabled: true,
+				include: ["**/*.txt"],
+				defaultEncoding: "gbk",
+				newFileEncoding: "gbk",
+				overrides: [],
+			});
+			await Bun.write(path.join(project, ".omp", "encoding.json"), textPolicy);
+			await Bun.write(path.join(project, "source.txt"), GBK_SOURCE);
+			const reader = new ReadTool(createSession(project, { "textEncoding.readFallback": "strict-utf8" }));
+			const before = resultText(await reader.execute("before", { path: "source.txt" }));
+			expect(before).toContain(preferred);
+			expect(before).toContain("does not cover this path");
+			await Bun.write(preferred, textPolicy);
+			expect(resultText(await reader.execute("after", { path: "source.txt" }))).toContain("中文");
+		});
+
 		it("falls back to legacy .omp/encoding.json when .ompg has no encoding.json", async () => {
 			const project = path.join(tempRoot, "legacy-only");
 			await fs.mkdir(path.join(project, ".omp"), { recursive: true });

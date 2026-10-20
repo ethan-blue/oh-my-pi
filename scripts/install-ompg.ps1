@@ -239,4 +239,4 @@ if (-not $already -and -not $NoPath) {
 }
 
 Write-Step "Done. Start a new terminal and run: ompg --version"
-Write-Step "To enable GBK for a project, create .omp\encoding.json there (see encoding.example.json in the release archive)."
+Write-Step "To enable GBK for a project, create .ompg\encoding.json there (legacy .omp\encoding.json remains compatible; see encoding.example.json in the release archive)."
