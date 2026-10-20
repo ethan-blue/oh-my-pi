@@ -21,6 +21,7 @@
 - GBK read and search diagnostics now point to the selected `.ompg` policy (or identify legacy `.omp` compatibility) instead of suggesting an ignored config file.
 - `/mcp enable` now connects a server whose project `mcp.json` was just created: MCP config writes refresh project-config discovery instead of serving a stale negative lookup for up to a second.
 - Subagent dispatch keeps `maxRuntimeMs` unset unless a per-agent runtime override or an explicit run cap applies, restoring the documented inheritance contract for eval bridges and SDK consumers.
+- File mentions that skip an undecodable file keep the established "binary file" wording ahead of the strict UTF-8/GBK diagnostics.
 - SDK sessions with a custom agent directory now load user SYSTEM.md and SYSTEM_TEMPLATE.md from that directory.
 - Explicit searches of large UTF-8 files now find matches beyond the first 4 MiB without bypassing strict decoding; GBK and multiline searches retain bounded windows and report incomplete coverage.
 - `ompg skill list` and `ompg read` now release temporary provider settings after each command.

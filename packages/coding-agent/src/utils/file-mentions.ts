@@ -330,9 +330,12 @@ export async function generateFileMentionMessages(
 			try {
 				content = decodeTextByMode(bytes, decodeMode, absolutePath);
 			} catch (error) {
+				// Undecodable bytes are why the mention was skipped: keep the
+				// established "binary file" vocabulary ahead of the strict
+				// UTF-8/GBK diagnostics so consumers can classify the skip.
 				files.push({
 					path: resolvedPath,
-					content: `(skipped auto-read: ${error instanceof Error ? error.message : String(error)})`,
+					content: `(skipped auto-read: binary file — ${error instanceof Error ? error.message : String(error)})`,
 					byteSize: stat.size,
 					skippedReason: "binary",
 				});
