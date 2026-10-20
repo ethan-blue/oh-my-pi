@@ -828,6 +828,60 @@ describe("Issue #4: config discovery and text encoding regression", () => {
 		});
 	});
 
+	describe("G12: detection-driven policy proposals in refusals and notices", () => {
+		it("write refusal carries a ready-to-write config that, applied verbatim, unblocks the edit", async () => {
+			const project = path.join(tempRoot, "proposal-roundtrip");
+			await fs.mkdir(project, { recursive: true });
+			const file = path.join(project, "main.c");
+			await Bun.write(file, GBK_SOURCE);
+			let refusal: string;
+			try {
+				await new WriteTool(createSession(project)).execute("w", { path: file, content: "int x = 99;\n" });
+				throw new Error("expected the unmanaged GBK write to be refused");
+			} catch (err) {
+				refusal = err instanceof Error ? err.message : String(err);
+			}
+			expect(refusal).toContain("writing it as UTF-8 would corrupt it");
+			expect(refusal).toContain(`write this to ${path.join(project, ".ompg", "encoding.json")}`);
+			expect(refusal).toContain('"include":["**/*.c"]');
+			expect(refusal).toContain('"defaultEncoding":"gbk"');
+			// The proposed config is complete: applying it verbatim re-enables the write,
+			// and the result persists as strict GBK bytes.
+			const config = refusal.slice(refusal.lastIndexOf("{"));
+			await Bun.write(path.join(project, ".ompg", "encoding.json"), config);
+			invalidateEncodingCaches();
+			const retried = await new WriteTool(createSession(project)).execute("w2", {
+				path: file,
+				content: "// \u4e2d\u6587\nint x = 99;\n",
+			});
+			expect(resultText(retried)).not.toContain("corrupt");
+			const persisted = await Bun.file(file).bytes();
+			const decoded = new TextDecoder("utf-8", { fatal: false }).decode(persisted);
+			expect(decoded).toContain("int x = 99;");
+			expect(decoded).not.toContain("\u4e2d\u6587"); // GBK bytes, not UTF-8 text
+		});
+
+		it("extensionless file proposes an exact-name glob", async () => {
+			const project = path.join(tempRoot, "proposal-noext");
+			await fs.mkdir(project, { recursive: true });
+			const file = path.join(project, "Makefile");
+			await Bun.write(file, GBK_SOURCE);
+			await expect(
+				new WriteTool(createSession(project)).execute("w", { path: file, content: "all:\n" }),
+			).rejects.toThrow('"include":["**/Makefile"]');
+		});
+
+		it("fallback read notice points at the same ready-to-write config", async () => {
+			const project = path.join(tempRoot, "proposal-notice");
+			await fs.mkdir(project, { recursive: true });
+			const file = path.join(project, "main.c");
+			await Bun.write(file, GBK_SOURCE);
+			const text = resultText(await new ReadTool(createSession(project)).execute("r", { path: file }));
+			expect(text).toContain("read-only automatic fallback");
+			expect(text).toContain(`write this to ${path.join(project, ".ompg", "encoding.json")}`);
+		});
+	});
+
 	describe("Review R1–R13 contracts: edge cases and security guarantees", () => {
 		it("R1 external GBK read then replace edit uses the target policy", async () => {
 			const active = path.join(tempRoot, "active");

@@ -8,6 +8,7 @@
 
 ### Added
 
+- Unmanaged GBK read-fallback notices and write refusals now carry a ready-to-write policy proposal — the exact `.ompg/encoding.json` path and minimal JSON derived from the file's own byte evidence — so applying the suggested config verbatim immediately enables strict GBK reads and edits (detection still never authorizes writes by itself).
 - Added exact-agent `task.agentRuntimeOverrides` for task and eval/workpool runs, including unlimited overrides and explicit-run limit precedence ([#5](https://github.com/ethan-blue/oh-my-pi/issues/5)).
 
 - Added `ompg encoding doctor/init`, automatic read-only GBK fallback, and preferred `.ompg` project configuration with `.omp` compatibility ([#4](https://github.com/ethan-blue/oh-my-pi/issues/4)).

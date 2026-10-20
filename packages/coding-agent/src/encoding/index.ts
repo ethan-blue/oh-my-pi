@@ -465,6 +465,49 @@ export function decodeTextByMode(bytes: Uint8Array, mode: TextDecodeMode, absolu
 }
 
 /**
+ * Nearest directory at or above `startDir` that looks like a project root
+ * (holds `.git`), for placing a proposed encoding policy. Never walks past a
+ * drive root; falls back to `startDir` itself.
+ */
+function nearestProjectRoot(startDir: string): string {
+	let dir = path.resolve(startDir);
+	for (let hops = 0; hops < 64; hops++) {
+		if (fs.existsSync(path.join(dir, ".git"))) return dir;
+		const parent = path.dirname(dir);
+		if (parent === dir) return path.resolve(startDir);
+		dir = parent;
+	}
+	return path.resolve(startDir);
+}
+
+/**
+ * Ready-to-write policy proposal for bytes proven GBK (invalid UTF-8, valid
+ * GBK) with no policy covering them: the minimal config that would manage
+ * exactly this file, anchored at the nearest project root. Detection stays a
+ * PROPOSAL — it never authorizes a write by itself; the user (or the agent on
+ * their instruction) writes the file, and every later read/edit goes through
+ * the strict codec. `undefined` when the bytes carry no such proof.
+ */
+export function gbkPolicyProposal(absolutePath: string, bytes: Uint8Array): string | undefined {
+	try {
+		decodeStrict(bytes, "utf8");
+		return undefined;
+	} catch {
+		// Not UTF-8 — the GBK probe below decides whether this is evidence.
+	}
+	try {
+		decodeStrict(bytes, "gbk");
+	} catch {
+		return undefined;
+	}
+	const extension = path.extname(absolutePath).toLowerCase();
+	const glob = extension ? `**/*${extension}` : `**/${path.basename(absolutePath)}`;
+	const configPath = path.join(nearestProjectRoot(path.dirname(path.resolve(absolutePath))), ".ompg", "encoding.json");
+	const config = JSON.stringify({ schemaVersion: 1, enabled: true, include: [glob], defaultEncoding: "gbk" });
+	return `The bytes are invalid UTF-8 and valid GBK, so this one file is proven GBK. To enable strict GBK reads AND edits, write this to ${configPath} (adjust "include" to the project's real scope): ${config}`;
+}
+
+/**
  * The visible notice when a file with no fixed policy assignment was read
  * through the automatic GBK fallback: `undefined` when the bytes are valid
  * UTF-8 (no fallback happened) or not valid GBK either (not fallback-readable).
@@ -482,7 +525,8 @@ export function unmanagedGbkFallbackNotice(absolutePath: string, bytes: Uint8Arr
 	} catch {
 		return undefined;
 	}
-	return `${absolutePath}: not valid UTF-8; decoded as GBK through the read-only automatic fallback (no encoding policy covers this path). This inference does NOT authorize GBK writes — create an explicit project policy (ompg encoding init --profile gbk-source) before editing this file.`;
+	const proposal = gbkPolicyProposal(absolutePath, bytes);
+	return `${absolutePath}: not valid UTF-8; decoded as GBK through the read-only automatic fallback (no encoding policy covers this path). This inference does NOT authorize GBK writes${proposal ? ` — ${proposal}` : " — create an explicit project policy (ompg encoding init --profile gbk-source) before editing this file."}`;
 }
 
 /**
@@ -535,8 +579,9 @@ export function assertTextWriteEligibility(
 	try {
 		decodeStrict(bytes, "utf8");
 	} catch {
+		const proposal = gbkPolicyProposal(absolutePath, bytes);
 		throw new Error(
-			`${absolutePath}: this file is not valid UTF-8 and has no explicit encoding policy, so writing it as UTF-8 would corrupt it. Create a project policy first (ompg encoding init --profile gbk-source, or add an include rule + override in .ompg/encoding.json), then edit through the native tools.`,
+			`${absolutePath}: this file is not valid UTF-8 and has no explicit encoding policy, so writing it as UTF-8 would corrupt it.${proposal ? ` ${proposal}` : " Create a project policy first (ompg encoding init --profile gbk-source, or add an include rule + override in .ompg/encoding.json), then edit through the native tools."}`,
 		);
 	}
 }
