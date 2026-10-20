@@ -1,20 +1,22 @@
-# ompg v18.12.3-gbk.1
+# ompg v18.12.3-gbk.2
 
 基于 OMP v18.12.3 的 Windows x64（AVX2）GBK 支持分支，预发布。
 命令 ompg、用户目录 ~/.ompg 与原版 omp 分开。
 
 ## 安装／升级
-退出 ompg，完整解压后在本目录运行：
+退出 ompg，完整解压后在本目录运行（装有 PowerShell 7 时优先 `pwsh`，避免 5.1 继承 PS7 会话的模块路径而冲突）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1
 ```
 
-默认安装到 %LOCALAPPDATA%\ompg\versions\18.12.3-gbk.1 并切换启动器。
+未安装 PowerShell 7 时，系统自带的 5.1 同样兼容：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-ompg.ps1`
+
+默认安装到 %LOCALAPPDATA%\ompg\versions\18.12.3-gbk.2 并切换启动器。
 自定义位置须加原来的 `-InstallDir "D:\Tools\ompg"`。
-新开终端执行 `ompg --version`，预期 ompg/18.12.3-gbk.1。
+新开终端执行 `ompg --version`，预期 ompg/18.12.3-gbk.2。
 旧版本保留；同版本不同字节拒绝覆盖。
-回退使用本版脚本加 `-Download -Version 18.11.1-gbk.1`，沿用原安装目录。
+回退使用本版脚本加 `-Download -Version 18.12.3-gbk.1`，沿用原安装目录。
 -NoPath 可禁止修改用户 PATH；-Uninstall 保留用户会话数据及非安装文件。
 
 ## 编码设置

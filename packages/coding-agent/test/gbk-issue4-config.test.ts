@@ -761,6 +761,73 @@ describe("Issue #4: config discovery and text encoding regression", () => {
 		});
 	});
 
+	describe("G11: minimal schema-1 policies and doctor diagnostics", () => {
+		/** The hand-written legacy shape from the post-18.12.3 user report: no `newFileEncoding`. */
+		const MINIMAL_SCHEMA1 = JSON.stringify({
+			enabled: true,
+			defaultEncoding: "gbk",
+			schemaVersion: 1,
+			include: ["**/*.c", "**/*.h"],
+		});
+
+		it("minimal schema-1 .omp policy (no newFileEncoding) manages the GBK read path", async () => {
+			const project = path.join(tempRoot, "minimal-schema1");
+			await fs.mkdir(project, { recursive: true });
+			await Bun.write(path.join(project, ".omp", "encoding.json"), MINIMAL_SCHEMA1);
+			const file = path.join(project, "main.c");
+			await Bun.write(file, GBK_SOURCE);
+			const text = resultText(await new ReadTool(createSession(project)).execute("r", { path: file }));
+			expect(text).toContain("// \u4e2d\u6587");
+			// Managed decode, not the read-only fallback for unmanaged files.
+			expect(text).not.toContain("automatic fallback");
+		});
+
+		it("minimal schema-1 policy authorizes the GBK write path", async () => {
+			const project = path.join(tempRoot, "minimal-schema1-write");
+			await fs.mkdir(project, { recursive: true });
+			await Bun.write(path.join(project, ".omp", "encoding.json"), MINIMAL_SCHEMA1);
+			const file = path.join(project, "types.h");
+			await Bun.write(file, GBK_SOURCE);
+			const session = createSession(project);
+			const result = await new EditTool(session, "apply_patch").execute("edit", {
+				input: `*** Begin Patch\n*** Update File: types.h\n@@\n-int x = 1;\n+int x = 2;\n*** End Patch\n`,
+			});
+			expect(result.isError).not.toBe(true);
+			// The rewrite persisted as GBK: the exact source bytes decode strictly.
+			expect(resultText(result)).not.toContain("not valid UTF-8");
+			const reread = resultText(await new ReadTool(session).execute("re", { path: file }));
+			expect(reread).toContain("int x = 2;");
+		});
+
+		it("doctor reports an uncompilable policy instead of crashing", async () => {
+			const project = path.join(tempRoot, "doctor-invalid");
+			await fs.mkdir(project, { recursive: true });
+			await Bun.write(
+				path.join(project, ".omp", "encoding.json"),
+				JSON.stringify({
+					enabled: true,
+					defaultEncoding: "gbk",
+					newFileEncoding: "utf8",
+					schemaVersion: 1,
+					include: ["**/*.c"],
+				}),
+			);
+			const file = path.join(project, "main.c");
+			await Bun.write(file, GBK_SOURCE);
+			const output = spyOn(console, "log").mockImplementation(() => {});
+			await runEncodingDoctorCommand(file, { json: true });
+			const report = JSON.parse(String(output.mock.calls[0]?.[0])) as {
+				configError?: { kind: string; message: string };
+				targetResolution?: { assignment: string };
+				nextAction: string;
+			};
+			expect(report.configError?.kind).toBe("invalid");
+			expect(report.configError?.message).toContain("newFileEncoding must equal defaultEncoding");
+			expect(report.targetResolution?.assignment).toBe("unmanaged");
+			expect(report.nextAction).toContain("Fix the encoding policy");
+		});
+	});
+
 	describe("Review R1–R13 contracts: edge cases and security guarantees", () => {
 		it("R1 external GBK read then replace edit uses the target policy", async () => {
 			const active = path.join(tempRoot, "active");

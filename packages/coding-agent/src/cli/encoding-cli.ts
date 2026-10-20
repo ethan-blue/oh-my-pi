@@ -16,6 +16,7 @@ import {
 	cfgTextEncodingReadFallback,
 	discoverEncodingPolicy,
 	ENCODING_CONFIG_FILE,
+	EncodingConfigError,
 	invalidateEncodingCaches,
 	resolveTextDecision,
 } from "../encoding/index";
@@ -37,6 +38,12 @@ export interface EncodingDoctorReport {
 		legacyShadowedPath?: string;
 		enabled?: boolean;
 		schemaVersion?: number;
+	};
+	/** A discovered policy that failed to compile or could not be read; the report still diagnoses the target. */
+	configError?: {
+		configPath: string;
+		kind: "permission" | "invalid";
+		message: string;
 	};
 	targetResolution?: {
 		assignment: "gbk" | "utf8" | "auto" | "unmanaged";
@@ -68,6 +75,7 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 	let selectedConfigPath: string | undefined;
 	let selectedNamespace: ".ompg" | ".omp" | undefined;
 	let legacyShadowedPath: string | undefined;
+	let configError: EncodingDoctorReport["configError"];
 
 	if (upward?.status === "found") {
 		projectRoot = upward.root;
@@ -81,7 +89,19 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 		}
 	}
 
-	const discovered = discoverEncodingPolicy(searchBase);
+	let discovered: ReturnType<typeof discoverEncodingPolicy>;
+	try {
+		discovered = discoverEncodingPolicy(searchBase);
+	} catch (error) {
+		// The doctor's job is to diagnose this exact state; an uncompilable or
+		// unreadable policy becomes a report field, never a stack trace.
+		if (error instanceof EncodingConfigError) {
+			configError = { configPath: error.configPath, kind: error.kind, message: error.message };
+			discovered = undefined;
+		} else {
+			throw error;
+		}
+	}
 	let enabled: boolean | undefined;
 	let schemaVersion: number | undefined;
 
@@ -104,7 +124,7 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 
 	let targetResolution: EncodingDoctorReport["targetResolution"] | undefined;
 	if (isFile) {
-		const decision = resolveTextDecision(targetAbsolute);
+		const decision = configError ? { assignment: "unmanaged" as const } : resolveTextDecision(targetAbsolute);
 		let writeEligible = true;
 		let writeRefusalReason: string | undefined;
 		try {
@@ -141,7 +161,9 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 	}
 
 	let nextAction: string;
-	if (!discovered || !selectedConfigPath) {
+	if (configError) {
+		nextAction = `Fix the encoding policy at ${configError.configPath}: ${configError.message} Tools treat this as a hard stop — reads and edits of covered files refuse until the policy compiles.`;
+	} else if (!discovered || !selectedConfigPath) {
 		nextAction = `Run \`ompg encoding init --profile gbk-source\` to generate an explicit project encoding policy (.ompg/encoding.json).`;
 	} else if (isFile && targetResolution?.assignment === "unmanaged") {
 		nextAction = `Target file is not covered by the include rules in ${selectedConfigPath}. Add its path pattern to the "include" array.`;
@@ -172,6 +194,7 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 					schemaVersion,
 				}
 			: undefined,
+		configError,
 		targetResolution,
 		globalSettings: {
 			readFallback,
@@ -194,13 +217,16 @@ export async function runEncodingDoctorCommand(targetPath?: string, flags?: { js
 	}
 	if (report.config?.selectedPath) {
 		console.log(
-			`Selected Policy:   ${chalk.green(report.config.selectedPath)} [${report.config.namespace ?? ".ompg"}] (v${report.config.schemaVersion ?? 1}, enabled: ${report.config.enabled ?? true})`,
+			`Selected Policy:   ${configError ? chalk.red(report.config.selectedPath) : chalk.green(report.config.selectedPath)} [${report.config.namespace ?? ".ompg"}] (v${report.config.schemaVersion ?? 1}, enabled: ${report.config.enabled ?? true})`,
 		);
 		if (report.config.legacyShadowedPath) {
 			console.log(`Legacy Policy:     ${chalk.yellow(report.config.legacyShadowedPath)} (shadowed by .ompg)`);
 		}
 	} else {
 		console.log(`Selected Policy:   ${chalk.yellow("None found upward (unmanaged mode)")}`);
+	}
+	if (report.configError) {
+		console.log(`Policy Error:      ${chalk.red(report.configError.message)}`);
 	}
 
 	if (report.targetResolution) {

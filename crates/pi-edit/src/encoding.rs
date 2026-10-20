@@ -479,6 +479,13 @@ impl CompiledEncodingPolicy {
 		}
 		let new_file_encoding = match &spec.new_file_encoding {
 			Some(name) => Some(TextEncoding::parse(name).map_err(PolicyError)?),
+			// Schema 1 predates the field: when it pins a fixed default, new
+			// files follow it — the equality rule below forces exactly that
+			// value anyway, so demanding it spelled out only rejected working
+			// hand-written configs. Schema 2 keeps the explicit requirement.
+			None if spec.schema_version == 1 => {
+				default_encoding.and_then(|assignment| assignment.fixed())
+			},
 			None => None,
 		};
 		if new_file_encoding.is_none() {
@@ -846,6 +853,49 @@ mod tests {
 			r#"{"schemaVersion": 1, "enabled": true, "include": ["src/**"], "newFileEncoding": "gbk"}"#,
 		);
 		assert!(CompiledEncodingPolicy::compile(Path::new("/p").to_path_buf(), &spec).is_err());
+	}
+
+	#[test]
+	fn schema1_minimal_config_derives_new_file_encoding_from_default() {
+		// The hand-written shape real projects carry (issue: read/edit of GBK
+		// sources refused after clients expected the minimal schema-1 file to
+		// work): defaultEncoding pinned, newFileEncoding never spelled out.
+		let policy = compiled(
+			r#"{"schemaVersion": 1, "enabled": true, "include": ["**/*.c", "**/*.h"], "defaultEncoding": "gbk"}"#,
+		);
+		assert_eq!(policy.resolve(Path::new("/proj/main.c"), true), Some(TextEncoding::Gbk));
+		assert_eq!(policy.resolve(Path::new("/proj/new.c"), false), Some(TextEncoding::Gbk));
+	}
+
+	#[test]
+	fn schema1_explicit_new_file_encoding_mismatch_still_rejected() {
+		let spec = spec_json(
+			r#"{"schemaVersion": 1, "enabled": true, "include": ["**/*.c"], "defaultEncoding": "gbk", "newFileEncoding": "utf8"}"#,
+		);
+		let error = CompiledEncodingPolicy::compile(Path::new("/p").to_path_buf(), &spec)
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("newFileEncoding must equal defaultEncoding"));
+	}
+
+	#[test]
+	fn schema2_minimal_config_still_requires_new_file_encoding() {
+		let spec = spec_json(
+			r#"{"schemaVersion": 2, "enabled": true, "include": ["**/*.c"], "defaultEncoding": "gbk"}"#,
+		);
+		let error = CompiledEncodingPolicy::compile(Path::new("/p").to_path_buf(), &spec)
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("newFileEncoding is required"));
+	}
+
+	#[test]
+	fn schema1_without_default_cannot_derive_new_file_encoding() {
+		let spec = spec_json(r#"{"schemaVersion": 1, "enabled": true, "include": []}"#);
+		let error = CompiledEncodingPolicy::compile(Path::new("/p").to_path_buf(), &spec)
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("newFileEncoding is required"));
 	}
 
 	#[test]

@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- Schema 1 `encoding.json` policies that pin `defaultEncoding` no longer fail with "newFileEncoding is required": new files follow the fixed default, so hand-written minimal GBK configs read and edit managed files without spelling the field out. Schema 2 policies keep the explicit requirement.
+- `ompg encoding doctor` now reports an unreadable or uncompilable encoding policy as a structured `configError` field (with fix guidance) instead of crashing with a stack trace.
 - Ask and remember now requests approval before searching existing local files or folders whose names resemble public web URLs.
 - GBK read and search diagnostics now point to the selected `.ompg` policy (or identify legacy `.omp` compatibility) instead of suggesting an ignored config file.
 - `/mcp enable` now connects a server whose project `mcp.json` was just created: MCP config writes refresh project-config discovery instead of serving a stale negative lookup for up to a second.
